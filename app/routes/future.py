@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app.models.schemas import FutureRequest, FutureResponse
 from app.services import (
@@ -14,10 +14,11 @@ from app.services import (
     aurora_service,
     light_pollution_service,
     location_service,
+    observation_window_service,
     scoring_service,
     weather_service,
 )
-from app.routes.planner import _best_window_for, _recommendation_for
+from app.routes.planner import _recommendation_for
 
 
 router = APIRouter(tags=["future"])
@@ -60,16 +61,17 @@ def _evaluate(
             "level": light_pollution["light_pollution_level"],
         },
         "aurora_chance": aurora["aurora_chance"],
-        "best_window": _best_window_for(target),
         "breakdown": breakdown,
     }
 
 
 @router.post("/future", response_model=FutureResponse)
-def predict_future(request: FutureRequest) -> FutureResponse:
+def predict_future(request: FutureRequest, http_request: Request) -> FutureResponse:
     try:
+        client_ip = http_request.client.host if http_request.client else None
         latitude, longitude, _ = location_service.resolve_location(
-            request.latitude, request.longitude, request.location_name
+            request.latitude, request.longitude, request.location_name,
+            client_ip=client_ip,
         )
 
         days = max(1, min(30, int(request.days)))
@@ -96,11 +98,23 @@ def predict_future(request: FutureRequest) -> FutureResponse:
         results.sort(key=lambda item: item["score"], reverse=True)
         best = results[0]
 
+        # Compute the real best observation window for the winning date.
+        best_window = observation_window_service.compute_best_window(
+            latitude, longitude, best["date"], request.target
+        )
+        best_window_str = (
+            f"{best_window['start']} - {best_window['end']}"
+            if best_window
+            else "n/a"
+        )
+        best["best_window"] = best_window_str
+        best["best_window_detail"] = best_window
+
         return FutureResponse(
             best_date=best["date"],
             best_time=best["time"],
             best_score=best["score"],
-            best_window=best["best_window"],
+            best_window=best_window_str,
             results=results,
             recommendation=_recommendation_for(best["score"]),
             ai_summary=ai_explanation_service.generate_future_summary(best),

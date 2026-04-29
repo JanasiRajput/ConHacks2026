@@ -25,6 +25,7 @@ class PlanResponse(BaseModel):
     visibility_score: int
     sky_quality: str
     best_window: str
+    best_window_detail: Optional[Dict[str, Any]] = None
     target: str
     location_name: str
     date: str

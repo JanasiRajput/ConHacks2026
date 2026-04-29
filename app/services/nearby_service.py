@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 from app.services import (
     astronomy_service,
     aurora_service,
+    geocoding_service,
     light_pollution_service,
     scoring_service,
     weather_service,
@@ -130,4 +131,14 @@ def get_nearby_dark_locations(
         )
 
     evaluated.sort(key=lambda item: item["score"], reverse=True)
-    return evaluated[:5]
+    top = evaluated[:5]
+
+    # Reverse-geocode just the top results so the response includes
+    # human-readable place names. Nominatim is rate-limited (1 req/s),
+    # but cached - so a repeated query is essentially free.
+    for site in top:
+        place = geocoding_service.reverse_geocode(site["latitude"], site["longitude"])
+        if place:
+            site["name"] = place
+            site["place_name"] = place
+    return top

@@ -41,10 +41,27 @@ http://127.0.0.1:8000/redoc
 | GET    | `/`               | Health check                                     |
 | POST   | `/api/plan`       | Full plan for a single date/time/target          |
 | POST   | `/api/future`     | Best-window forecast over the next N days        |
-| POST   | `/api/nearby`     | Nearby dark-sky locations                        |
+| POST   | `/api/nearby`     | Nearby dark-sky locations (named via Nominatim)  |
 | POST   | `/api/sky`        | Data for the 3D sky visualization                |
 | POST   | `/api/aurora`     | Aurora forecast for a coordinate                 |
+| POST   | `/api/events`     | "What's up tonight" target-agnostic feed         |
 | POST   | `/api/ai-search`  | Natural-language assistant powered by Gemini     |
+
+## Real data sources
+
+| Domain               | Source                                               |
+| -------------------- | ---------------------------------------------------- |
+| Weather              | Open-Meteo forecast API                              |
+| Astronomy / planets  | Skyfield + JPL DE421 ephemeris                       |
+| Constellations       | IAU/Hipparcos reference stars + Skyfield alt/az      |
+| Meteor showers       | IAU MDC established showers catalog                  |
+| Light pollution      | OpenStreetMap Overpass populated places              |
+| Geocoding            | OpenStreetMap Nominatim (forward + reverse, cached)  |
+| IP geolocation       | ipapi.co (used when no coordinates supplied)         |
+| Aurora               | NOAA SWPC planetary K-index                          |
+| AI explanations      | Google Gemini (`gemini-2.0-flash`)                   |
+| Best-window scan     | Skyfield ephemeris sweep                             |
+| Camera settings      | Computed from Bortle / moon / score / focal length   |
 
 ## AI search
 
@@ -118,20 +135,26 @@ app/
   services/
     weather_service.py
     astronomy_service.py
+    constellation_service.py
+    meteor_shower_service.py
     light_pollution_service.py
+    observation_window_service.py
     scoring_service.py
     nearby_service.py
     aurora_service.py
     sky_events_service.py
+    geocoding_service.py
+    location_service.py
     ai_explanation_service.py
     gemini_service.py
 ```
 
 ## Notes
 
-- All external data is currently mocked with deterministic, realistic
-  fallbacks. Each service is the single integration point for its real
-  data source - swap the body of `get_*` functions and the rest of the
-  backend keeps working.
+- Every service is "real-first": it tries the real upstream API,
+  caches successful responses, and only falls back to a deterministic
+  fallback if the upstream is unreachable. Look for `source: "fallback"`
+  in a service response if you need to confirm whether a result came
+  from the real API.
 - CORS is open to all origins so the SkyLens 3D frontend can call the
   backend from any environment during the hackathon.
