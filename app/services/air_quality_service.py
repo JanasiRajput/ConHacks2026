@@ -83,13 +83,13 @@ def _fetch(latitude: float, longitude: float, date: str, time: str) -> Dict[str,
 
     target_iso = f"{date}T{time[:5]}"
     best_idx = _closest_hour_index(times, target_iso)
-    aqi_value = aqi_series[best_idx]
+    aqi_value = _safe_float(aqi_series, best_idx)
     if aqi_value is None:
         raise ValueError("Air-quality value at closest hour is null")
 
     return {
-        "aqi": round(float(aqi_value), 1),
-        "aqi_band": _aqi_band(float(aqi_value)),
+        "aqi": aqi_value,
+        "aqi_band": _aqi_band(aqi_value),
         "pm2_5": _safe_float(pm25_series, best_idx),
         "pm10": _safe_float(pm10_series, best_idx),
         "scale": "European AQI",
