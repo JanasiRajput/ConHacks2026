@@ -12,7 +12,16 @@ except Exception:  # pragma: no cover - dotenv is optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routes import ai_search, aurora, events, future, nearby, planner, sky
+from app.routes import (
+    ai_search,
+    aurora,
+    events,
+    future,
+    nearby,
+    planner,
+    sky,
+    weather_nearby,
+)
 
 
 app = FastAPI(
@@ -36,6 +45,7 @@ app.add_middleware(
 app.include_router(planner.router, prefix="/api")
 app.include_router(future.router, prefix="/api")
 app.include_router(nearby.router, prefix="/api")
+app.include_router(weather_nearby.router, prefix="/api")
 app.include_router(sky.router, prefix="/api")
 app.include_router(aurora.router, prefix="/api")
 app.include_router(events.router, prefix="/api")
