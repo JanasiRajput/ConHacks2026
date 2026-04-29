@@ -147,3 +147,27 @@ class AISearchResponse(BaseModel):
     parsed: Dict[str, Any]
     route: str
     ai_source: str
+
+
+# ---------------------------------------------------------------------------
+# /api/weather/nearby - weather-only nearby recommendations
+# ---------------------------------------------------------------------------
+class WeatherNearbyLocation(BaseModel):
+    name: str
+    latitude: float
+    longitude: float
+    distance_km: float
+    weather_score: int = Field(..., ge=0, le=100)
+    cloud_cover: int = Field(..., ge=0, le=100)
+    visibility_km: float = Field(..., ge=0)
+    humidity: int = Field(..., ge=0, le=100)
+    wind_speed_kmh: float = Field(..., ge=0)
+    condition: str
+
+
+class WeatherNearbyResponse(BaseModel):
+    requested_location: Dict[str, float]
+    date: str
+    time: str
+    best_location: Optional[WeatherNearbyLocation] = None
+    recommendations: List[WeatherNearbyLocation]

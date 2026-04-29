@@ -45,6 +45,7 @@ http://127.0.0.1:8000/redoc
 | POST   | `/api/sky`        | Data for the 3D sky visualization                |
 | POST   | `/api/aurora`     | Aurora forecast for a coordinate                 |
 | POST   | `/api/ai-search`  | Natural-language assistant powered by Gemini     |
+| GET    | `/api/weather/nearby` | Nearby recommendations based only on weather |
 
 ## AI search
 
