@@ -9,6 +9,8 @@ pollution data and returns scored candidates.
 from __future__ import annotations
 
 import math
+import os
+import logging
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -26,6 +28,13 @@ from app.services import (
 _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 _OVERPASS_TIMEOUT_SECONDS = 18
 _MAX_EVALUATIONS = 24
+_GOOGLE_TIMEOUT_SECONDS = 10
+
+_GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
+_GOOGLE_PLACES_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+_GOOGLE_DIRECTIONS_URL = "https://maps.googleapis.com/maps/api/directions/json"
+
+logger = logging.getLogger(__name__)
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -86,7 +95,159 @@ def _place_type(tags: Dict[str, Any]) -> str:
     return "place"
 
 
+def _google_api_key() -> str | None:
+    raw = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    if not raw:
+        return None
+    key = raw.strip()
+    return key or None
+
+
+def geocode_place_name_google(name: str) -> tuple[float, float, str] | None:
+    """Forward geocode from user-entered address/city using Google Geocoding API."""
+    key = _google_api_key()
+    if not key or not name:
+        return None
+    try:
+        resp = requests.get(
+            _GOOGLE_GEOCODE_URL,
+            params={"address": name, "key": key},
+            timeout=_GOOGLE_TIMEOUT_SECONDS,
+            headers={"User-Agent": "SkyLens-3D/1.0"},
+        )
+        resp.raise_for_status()
+        body = resp.json() or {}
+        if body.get("status") != "OK":
+            return None
+        first = (body.get("results") or [None])[0]
+        if not first:
+            return None
+        loc = (first.get("geometry") or {}).get("location") or {}
+        lat = loc.get("lat")
+        lon = loc.get("lng")
+        if lat is None or lon is None:
+            return None
+        formatted = first.get("formatted_address") or name
+        return float(lat), float(lon), str(formatted)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Google geocoding failed for %r: %s", name, exc)
+        return None
+
+
+def _google_directions(
+    origin_lat: float,
+    origin_lon: float,
+    dest_lat: float,
+    dest_lon: float,
+) -> Dict[str, Any]:
+    key = _google_api_key()
+    if not key:
+        return {"route_available": False}
+    try:
+        resp = requests.get(
+            _GOOGLE_DIRECTIONS_URL,
+            params={
+                "origin": f"{origin_lat},{origin_lon}",
+                "destination": f"{dest_lat},{dest_lon}",
+                "mode": "driving",
+                "key": key,
+            },
+            timeout=_GOOGLE_TIMEOUT_SECONDS,
+            headers={"User-Agent": "SkyLens-3D/1.0"},
+        )
+        resp.raise_for_status()
+        body = resp.json() or {}
+        if body.get("status") != "OK":
+            return {"route_available": False}
+        route = (body.get("routes") or [None])[0]
+        leg = ((route or {}).get("legs") or [None])[0]
+        if not leg:
+            return {"route_available": False}
+        dist_m = ((leg.get("distance") or {}).get("value")) or 0
+        dur_s = ((leg.get("duration") or {}).get("value")) or 0
+        return {
+            "route_available": True,
+            "distance_km": round(float(dist_m) / 1000.0, 1),
+            "travel_time_minutes": int(round(float(dur_s) / 60.0)),
+        }
+    except Exception:  # noqa: BLE001
+        return {"route_available": False}
+
+
+def _fetch_google_places(
+    latitude: float,
+    longitude: float,
+    radius_km: int,
+) -> List[Dict[str, Any]]:
+    key = _google_api_key()
+    if not key:
+        return []
+
+    radius_m = max(1_000, min(int(radius_km * 1000), 50_000))
+    keywords = [
+        "park",
+        "conservation",
+        "lookout",
+        "nature",
+        "dark sky",
+    ]
+    seen: set[tuple[str, float, float]] = set()
+    places: List[Dict[str, Any]] = []
+    for kw in keywords:
+        try:
+            resp = requests.get(
+                _GOOGLE_PLACES_URL,
+                params={
+                    "location": f"{latitude},{longitude}",
+                    "radius": radius_m,
+                    "keyword": kw,
+                    "key": key,
+                },
+                timeout=_GOOGLE_TIMEOUT_SECONDS,
+                headers={"User-Agent": "SkyLens-3D/1.0"},
+            )
+            resp.raise_for_status()
+            body = resp.json() or {}
+            if body.get("status") not in {"OK", "ZERO_RESULTS"}:
+                continue
+            for item in body.get("results") or []:
+                name = (item.get("name") or "").strip()
+                if not name:
+                    continue
+                loc = ((item.get("geometry") or {}).get("location") or {})
+                lat = loc.get("lat")
+                lon = loc.get("lng")
+                if lat is None or lon is None:
+                    continue
+                lat_f = float(lat)
+                lon_f = float(lon)
+                dedupe = (name.lower(), round(lat_f, 5), round(lon_f, 5))
+                if dedupe in seen:
+                    continue
+                seen.add(dedupe)
+                places.append({
+                    "name": name,
+                    "latitude": lat_f,
+                    "longitude": lon_f,
+                    "distance_km": _haversine_km(latitude, longitude, lat_f, lon_f),
+                    "address": (item.get("vicinity") or "").strip() or None,
+                    "tags": {"keyword": kw},
+                    "type": "google_place",
+                    "source": "Google Places API",
+                })
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Google Places lookup failed for keyword %r: %s", kw, exc)
+            continue
+
+    places.sort(key=lambda p: (p["distance_km"], p["name"].lower()))
+    return places[:_MAX_EVALUATIONS]
+
+
 def _fetch_real_places(latitude: float, longitude: float, radius_km: int) -> List[Dict[str, Any]]:
+    google_places = _fetch_google_places(latitude, longitude, radius_km)
+    if google_places:
+        return google_places
+
     payload = {"data": _overpass_query(latitude, longitude, radius_km)}
     try:
         response = requests.post(
@@ -123,8 +284,10 @@ def _fetch_real_places(latitude: float, longitude: float, radius_km: int) -> Lis
             "latitude": lat,
             "longitude": lon,
             "distance_km": _haversine_km(latitude, longitude, lat, lon),
+            "address": None,
             "tags": tags,
             "type": _place_type(tags),
+            "source": "OpenStreetMap Overpass",
         })
 
     places.sort(key=lambda p: p["distance_km"])
@@ -141,6 +304,11 @@ def _evaluate_point(
     name: str,
     place_type: str,
     tags: Dict[str, Any],
+    *,
+    source: str = "OpenStreetMap Overpass",
+    address: str | None = None,
+    origin_latitude: float | None = None,
+    origin_longitude: float | None = None,
 ) -> Dict[str, Any]:
     # NOTE: do NOT use parallel.gather() here. We're already inside a
     # gather() call from the candidate sweep above, and the shared
@@ -156,22 +324,44 @@ def _evaluate_point(
     )
 
     bortle_class = int(light_pollution.get("bortle_class", 5))
+    maps_url = f"https://www.google.com/maps/search/?api=1&query={latitude},{longitude}"
+    navigation = {"route_available": False}
+    if origin_latitude is not None and origin_longitude is not None:
+        navigation = _google_directions(origin_latitude, origin_longitude, latitude, longitude)
     return {
         "name": name,
         "latitude": latitude,
         "longitude": longitude,
         "distance_km": distance_km,
         "score": score,
+        "address": address,
+        "maps_url": maps_url,
         "bortle_class": bortle_class,
         "estimated_bortle_class": bortle_class,
         "type": place_type,
         "tags": tags,
+        "source": source,
+        "navigation": navigation,
         "reason": "Lower light pollution and better sky clarity",
         "weather_snapshot": {
             "cloud_cover": weather.get("cloud_cover"),
             "condition": weather.get("condition"),
         },
     }
+
+
+def list_real_named_places(
+    latitude: float,
+    longitude: float,
+    radius_km: int,
+) -> List[Dict[str, Any]]:
+    """Return named OSM candidates only (no weather/score evaluation).
+
+    Used by ``/api/upcoming-moments`` so we never invent coordinates:
+    every row comes from the same Overpass pipeline as
+    :func:`get_nearby_dark_locations`.
+    """
+    return _fetch_real_places(latitude, longitude, radius_km)
 
 
 def get_nearby_dark_locations(
@@ -200,6 +390,10 @@ def get_nearby_dark_locations(
                 place["name"],
                 place["type"],
                 place["tags"],
+                source=str(place.get("source") or "OpenStreetMap Overpass"),
+                address=place.get("address"),
+                origin_latitude=latitude,
+                origin_longitude=longitude,
             )
         )
         for idx, p in enumerate(places)

@@ -18,6 +18,7 @@ from app.services import (
     scoring_service,
     weather_service,
 )
+from app.services.data_sources import build_data_sources
 from app.services.cache import TTLCache
 from app.services.parallel import gather
 from app.routes.planner import _recommendation_for
@@ -80,7 +81,15 @@ def _evaluate_day(
     }
 
 
-@router.post("/future", response_model=FutureResponse)
+@router.post(
+    "/future",
+    response_model=FutureResponse,
+    summary="Future Night Predictor",
+    description=(
+        "Scan upcoming nights for one location and rank the best windows. "
+        "Best for: 'When is the best night this week?'"
+    ),
+)
 def predict_future(request: FutureRequest, http_request: Request) -> FutureResponse:
     try:
         client_ip = http_request.client.host if http_request.client else None
@@ -155,6 +164,12 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
             results=results,
             recommendation=_recommendation_for(best["score"]),
             ai_summary=ai_explanation_service.generate_future_summary(best),
+            data_sources=build_data_sources(
+                weather_status="live_or_fallback",
+                aurora_status=("fallback" if aurora.get("source") == "fallback" else "live"),
+                nearby_status="not_used",
+                ai_status="fallback",
+            ),
         )
         _future_cache.set(cache_key, response)
         return response

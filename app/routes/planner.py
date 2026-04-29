@@ -17,6 +17,7 @@ from app.services import (
     sky_events_service,
     weather_service,
 )
+from app.services.data_sources import build_data_sources
 from app.services.cache import TTLCache
 from app.services.parallel import gather
 
@@ -51,7 +52,15 @@ def _cache_key(latitude: float, longitude: float, request: PlanRequest) -> tuple
     )
 
 
-@router.post("/plan", response_model=PlanResponse)
+@router.post(
+    "/plan",
+    response_model=PlanResponse,
+    summary="Live Sky Planner",
+    description=(
+        "Analyze one selected location, date, time, and target using live/current data "
+        "where available. Best for: 'What are conditions like here at this time?'"
+    ),
+)
 def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
     try:
         client_ip = http_request.client.host if http_request.client else None
@@ -155,6 +164,7 @@ def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
             best_window_detail=best_window,
             target=request.target,
             location_name=location_name,
+            location={"latitude": latitude, "longitude": longitude},
             date=request.date,
             time=request.time,
             weather=weather,
@@ -167,6 +177,12 @@ def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
             recommendation=_recommendation_for(score),
             ai_summary=ai_summary,
             ai_insight=ai_insight,
+            data_sources=build_data_sources(
+                weather_status=("fallback" if weather.get("source") == "fallback" else "live"),
+                aurora_status=("fallback" if aurora.get("source") == "fallback" else "live"),
+                nearby_status="not_used",
+                ai_status=("fallback" if ai_insight.get("source") == "fallback" else "live"),
+            ),
             breakdown=breakdown,
         )
         _plan_cache.set(cache_key, response)

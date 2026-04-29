@@ -6,7 +6,7 @@ Response keys here are stable - downstream clients depend on them.
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +28,7 @@ class PlanResponse(BaseModel):
     best_window_detail: Optional[Dict[str, Any]] = None
     target: str
     location_name: str
+    location: Optional[Dict[str, float]] = None
     date: str
     time: str
     weather: Dict[str, Any]
@@ -38,6 +39,7 @@ class PlanResponse(BaseModel):
     sky_events: Optional[Dict[str, Any]] = None
     camera_settings: Dict[str, Any]
     ai_insight: Optional[Dict[str, Any]] = None
+    data_sources: Optional[Dict[str, Any]] = None
     recommendation: str
     ai_summary: str
     breakdown: Dict[str, Any]
@@ -62,6 +64,7 @@ class FutureResponse(BaseModel):
     results: List[Dict[str, Any]]
     recommendation: str
     ai_summary: str
+    data_sources: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -79,9 +82,15 @@ class NearbyResponse(BaseModel):
     current_location_score: int
     best_locations: List[Dict[str, Any]]
     recommended_locations: Optional[List[Dict[str, Any]]] = None
+    candidate_locations: Optional[List[Dict[str, Any]]] = None
+    pin_location: Optional[Dict[str, Any]] = None
+    best_spot: Optional[Dict[str, Any]] = None
+    alternatives: Optional[List[Dict[str, Any]]] = None
+    note: Optional[str] = None
     recommendation: str
     message: Optional[str] = None
     suggestion: Optional[str] = None
+    data_sources: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +162,7 @@ class EventsResponse(BaseModel):
     sky_events: Dict[str, Any]
     aurora: Dict[str, Any]
     summary: str
+    data_sources: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -172,3 +182,45 @@ class AISearchResponse(BaseModel):
     parsed: Dict[str, Any]
     route: str
     ai_source: str
+    structured_answer: Optional[Dict[str, Any]] = None
+    data_sources: Optional[Dict[str, Any]] = None
+
+
+# ---------------------------------------------------------------------------
+# /api/upcoming-moments
+# ---------------------------------------------------------------------------
+class MomentConditions(BaseModel):
+    cloud_cover: float
+    moon_illumination: float
+    moon_altitude: float
+    bortle_class: int
+    aurora_chance: str
+
+
+class SkyMoment(BaseModel):
+    id: str
+    title: str
+    location_name: str
+    latitude: float
+    longitude: float
+    distance_km: float
+    date: str
+    time: str
+    score: int
+    sky_quality: str
+    reason: str
+    visible_objects: List[str]
+    conditions: MomentConditions
+
+
+class UpcomingMomentsRequest(BaseModel):
+    latitude: float
+    longitude: float
+    radius_km: float = Field(default=100.0, ge=1, le=300)
+    days: int = Field(default=7, ge=1, le=7)
+
+
+class UpcomingMomentsResponse(BaseModel):
+    moments: List[SkyMoment]
+    message: Optional[str] = None
+    data_sources: Optional[Dict[str, Any]] = None
