@@ -95,15 +95,15 @@ def _build_prompt(query: str, data: Dict[str, Any]) -> str:
     """Compose a tightly scoped prompt that grounds Gemini in real data."""
     structured = json.dumps(data, indent=2, default=str)
     return (
-        "You are SkyLens, an astrophotography assistant. A photographer is "
-        "asking a natural-language question and you must answer it using "
-        "ONLY the structured data provided.\n\n"
+        "You are SkyLens, a beginner-friendly astrophotography assistant. "
+        "The user may ask in casual slang (for example: 'tn', 'best spot near me', "
+        "'jupiter visible?'). You must answer using ONLY the structured data provided.\n\n"
         f"Question: {query!r}\n\n"
         "Computed data (JSON):\n"
         f"{structured}\n\n"
-        "Write a single concise paragraph (2-4 sentences) directly answering "
-        "the question. Use specific numbers when helpful (cloud cover, Bortle "
-        "class, Kp index, planet altitude/azimuth). Mention the best shooting "
-        "window, compass direction, and the visibility score if relevant. Be "
-        "friendly but factual. Do not invent data that isn't provided."
+        "Return plain text only (no markdown) with this style:\n"
+        "1) First sentence: direct answer in simple words.\n"
+        "2) Second sentence: why, with 1-2 key numbers.\n"
+        "3) Optional third sentence: what to do next.\n"
+        "Keep it short, clear, and human. Do not invent data that isn't provided."
     )

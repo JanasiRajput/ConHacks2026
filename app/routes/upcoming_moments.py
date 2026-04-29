@@ -7,6 +7,7 @@ within the process thread pool and to avoid hammering free-tier APIs.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from datetime import date, datetime, timedelta
@@ -90,7 +91,15 @@ def _gather_chunked(
     keys = list(tasks.keys())
     for i in range(0, len(keys), chunk_size):
         chunk = {k: tasks[k] for k in keys[i : i + chunk_size]}
-        out.update(gather(chunk))
+        try:
+            out.update(gather(chunk))
+        except Exception:
+            # Partial-results mode: keep successful slots and skip failures.
+            for key, task in chunk.items():
+                try:
+                    out[key] = task()
+                except Exception:
+                    out[key] = None
     return out
 
 
@@ -263,7 +272,7 @@ def _evaluate_slot(
         "Best for: 'What good sky-viewing opportunities are coming near me?'"
     ),
 )
-def upcoming_moments(body: UpcomingMomentsRequest) -> UpcomingMomentsResponse:
+async def upcoming_moments(body: UpcomingMomentsRequest) -> UpcomingMomentsResponse:
     try:
         try:
             radius = int(round(body.radius_km))
@@ -276,7 +285,8 @@ def upcoming_moments(body: UpcomingMomentsRequest) -> UpcomingMomentsResponse:
         radius = max(1, min(radius, 300))
         days = max(1, min(days, 7))
 
-        places = nearby_service.list_real_named_places(
+        places = await asyncio.to_thread(
+            nearby_service.list_real_named_places,
             body.latitude,
             body.longitude,
             radius,
@@ -298,14 +308,21 @@ def upcoming_moments(body: UpcomingMomentsRequest) -> UpcomingMomentsResponse:
 
         tasks: Dict[str, Callable[[], Any]] = {}
         for pidx, place in enumerate(places):
-            lp = light_pollution_service.get_light_pollution_data(
+            lp_f = asyncio.to_thread(
+                light_pollution_service.get_light_pollution_data,
                 float(place["latitude"]),
                 float(place["longitude"]),
             )
-            aur = aurora_service.get_aurora_data(
+            aur_f = asyncio.to_thread(
+                aurora_service.get_aurora_data,
                 float(place["latitude"]),
                 float(place["longitude"]),
             )
+            lp, aur = await asyncio.gather(lp_f, aur_f, return_exceptions=True)
+            if isinstance(lp, Exception):
+                lp = {"bortle_class": 5, "source": "fallback"}
+            if isinstance(aur, Exception):
+                aur = {"aurora_chance": "Low", "source": "fallback"}
             for date_str, time_str in slots:
                 key = f"{pidx}:{date_str}:{time_str}"
 

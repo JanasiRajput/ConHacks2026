@@ -8,6 +8,7 @@ pollution data and returns scored candidates.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 import logging
@@ -33,6 +34,8 @@ _GOOGLE_TIMEOUT_SECONDS = 10
 _GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 _GOOGLE_PLACES_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
 _GOOGLE_DIRECTIONS_URL = "https://maps.googleapis.com/maps/api/directions/json"
+_GOOGLE_AUTOCOMPLETE_URL = "https://maps.googleapis.com/maps/api/place/autocomplete/json"
+_GOOGLE_PLACE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +52,76 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     )
     c = 2 * math.asin(math.sqrt(a))
     return round(r * c, 1)
+
+
+def min_distance_to_places_km(lat: float, lon: float, places: List[Dict[str, Any]]) -> float | None:
+    """Minimum great-circle distance from a point to scored place dicts (lat/lon)."""
+    if not places:
+        return None
+    best: float | None = None
+    for p in places:
+        try:
+            d = _haversine_km(lat, lon, float(p["latitude"]), float(p["longitude"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+        best = d if best is None else min(best, d)
+    return best
+
+
+def _destination_point_km(lat: float, lon: float, bearing_deg: float, distance_km: float) -> tuple[float, float]:
+    """Great-circle destination from (lat, lon) given initial bearing and distance."""
+    R = 6371.0
+    δ = distance_km / R
+    θ = math.radians(bearing_deg)
+    φ1 = math.radians(lat)
+    λ1 = math.radians(lon)
+    φ2 = math.asin(
+        math.sin(φ1) * math.cos(δ) + math.cos(φ1) * math.sin(δ) * math.cos(θ)
+    )
+    λ2 = λ1 + math.atan2(
+        math.sin(θ) * math.sin(δ) * math.cos(φ1),
+        math.cos(δ) - math.sin(φ1) * math.sin(φ2),
+    )
+    return math.degrees(φ2), (math.degrees(λ2) + 540.0) % 360.0 - 180.0
+
+
+def build_visibility_grid_points(
+    lat: float,
+    lon: float,
+    radius_km: float,
+    *,
+    max_points: int = 18,
+) -> List[tuple[float, float]]:
+    """Spread 10–20 sample coordinates within radius_km (center + rings)."""
+    n = max(10, min(20, int(max_points)))
+    rk = max(1.0, float(radius_km))
+    pts: List[tuple[float, float]] = [(lat, lon)]
+    need = n - 1
+    if need <= 0:
+        return pts[:n]
+
+    if need <= 6:
+        ring_fracs = [0.72]
+    elif need <= 12:
+        ring_fracs = [0.42, 0.82]
+    else:
+        ring_fracs = [0.28, 0.52, 0.88]
+
+    n_rings = len(ring_fracs)
+    base = need // n_rings
+    extra = need % n_rings
+    for ring_i, frac in enumerate(ring_fracs):
+        n_this = base + (1 if ring_i < extra else 0)
+        n_this = max(3, min(n_this, need))
+        dist_km = rk * frac * 0.98
+        bearing_offset = (360.0 / (2 * n_this)) * (ring_i % 2)
+        for j in range(n_this):
+            bearing = bearing_offset + j * (360.0 / n_this)
+            plat, plon = _destination_point_km(lat, lon, bearing, dist_km)
+            pts.append((plat, plon))
+            if len(pts) >= n:
+                return pts[:n]
+    return pts[:n]
 
 
 def _overpass_query(latitude: float, longitude: float, radius_km: int) -> str:
@@ -243,6 +316,72 @@ def _fetch_google_places(
     return places[:_MAX_EVALUATIONS]
 
 
+def suggest_addresses_google(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Suggest real addresses/place labels and coordinates via Google."""
+    key = _google_api_key()
+    q = (query or "").strip()
+    if not key or len(q) < 3:
+        return []
+    try:
+        resp = requests.get(
+            _GOOGLE_AUTOCOMPLETE_URL,
+            params={
+                "input": q,
+                "types": "geocode",
+                "key": key,
+            },
+            timeout=_GOOGLE_TIMEOUT_SECONDS,
+            headers={"User-Agent": "SkyLens-3D/1.0"},
+        )
+        resp.raise_for_status()
+        body = resp.json() or {}
+        if body.get("status") not in {"OK", "ZERO_RESULTS"}:
+            return []
+        predictions = body.get("predictions") or []
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Google autocomplete failed for %r: %s", q, exc)
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for item in predictions[: max(1, min(limit, 8))]:
+        place_id = item.get("place_id")
+        desc = (item.get("description") or "").strip()
+        if not place_id or not desc:
+            continue
+        lat = None
+        lon = None
+        try:
+            dresp = requests.get(
+                _GOOGLE_PLACE_DETAILS_URL,
+                params={
+                    "place_id": place_id,
+                    "fields": "geometry/location,formatted_address,name",
+                    "key": key,
+                },
+                timeout=_GOOGLE_TIMEOUT_SECONDS,
+                headers={"User-Agent": "SkyLens-3D/1.0"},
+            )
+            dresp.raise_for_status()
+            dbody = dresp.json() or {}
+            if dbody.get("status") == "OK":
+                result = dbody.get("result") or {}
+                loc = ((result.get("geometry") or {}).get("location") or {})
+                lat = loc.get("lat")
+                lon = loc.get("lng")
+                if result.get("formatted_address"):
+                    desc = str(result.get("formatted_address"))
+        except Exception:
+            pass
+        out.append({
+            "description": desc,
+            "place_id": place_id,
+            "latitude": float(lat) if lat is not None else None,
+            "longitude": float(lon) if lon is not None else None,
+            "source": "Google Places Autocomplete",
+        })
+    return out
+
+
 def _fetch_real_places(latitude: float, longitude: float, radius_km: int) -> List[Dict[str, Any]]:
     google_places = _fetch_google_places(latitude, longitude, radius_km)
     if google_places:
@@ -350,6 +489,209 @@ def _evaluate_point(
     }
 
 
+_OPTIMAL_COORD_REASON = "Best sky visibility based on all factors"
+
+OPTIMAL_COORD_SAFETY_NOTE = (
+    "Optimal coordinates may not correspond to a named place. "
+    "Use nearby real locations for safe access."
+)
+
+
+async def _compute_visibility_score_at_async(
+    latitude: float,
+    longitude: float,
+    date: str,
+    time: str,
+    target: str,
+) -> tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]] | None:
+    """Run the four upstreams in parallel and return score + payloads, or None."""
+    weather_f = asyncio.to_thread(
+        weather_service.get_weather_data, latitude, longitude, date, time
+    )
+    astronomy_f = asyncio.to_thread(
+        astronomy_service.get_astronomy_data, latitude, longitude, date, time
+    )
+    light_f = asyncio.to_thread(
+        light_pollution_service.get_light_pollution_data, latitude, longitude
+    )
+    aurora_f = asyncio.to_thread(aurora_service.get_aurora_data, latitude, longitude)
+    weather, astronomy, light_pollution, aurora = await asyncio.gather(
+        weather_f, astronomy_f, light_f, aurora_f, return_exceptions=True
+    )
+    if any(isinstance(v, Exception) for v in (weather, astronomy, light_pollution, aurora)):
+        return None
+    score, _ = scoring_service.calculate_score(
+        weather, astronomy, light_pollution, aurora, target
+    )
+    return (
+        int(score),
+        weather,
+        astronomy,
+        light_pollution,
+        aurora,
+    )
+
+
+async def find_optimal_coordinates_async(
+    origin_latitude: float,
+    origin_longitude: float,
+    radius_km: float,
+    target: str,
+    *,
+    max_grid_points: int = 18,
+    concurrency: int = 10,
+    per_point_timeout_s: float = 4.5,
+) -> Dict[str, Any] | None:
+    """Score a latitude/longitude grid within radius and return the best pin."""
+    date = datetime.utcnow().strftime("%Y-%m-%d")
+    time_slot = "23:00"
+    grid_n = max(10, min(20, int(max_grid_points)))
+    pairs = build_visibility_grid_points(
+        origin_latitude,
+        origin_longitude,
+        radius_km,
+        max_points=grid_n,
+    )
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _one_cell(pair: tuple[float, float]) -> Dict[str, Any] | None:
+        plat, plon = pair
+        async with semaphore:
+            try:
+                scored = await asyncio.wait_for(
+                    _compute_visibility_score_at_async(
+                        plat, plon, date, time_slot, target
+                    ),
+                    timeout=per_point_timeout_s,
+                )
+            except asyncio.TimeoutError:
+                return None
+            if scored is None:
+                return None
+            score_int, _, _, _, _ = scored
+            dist = _haversine_km(origin_latitude, origin_longitude, plat, plon)
+            return {
+                "latitude": round(plat, 6),
+                "longitude": round(plon, 6),
+                "score": score_int,
+                "distance_km_from_origin": dist,
+                "maps_url": f"https://www.google.com/maps/search/?api=1&query={plat},{plon}",
+            }
+
+    rows = await asyncio.gather(*(_one_cell(p) for p in pairs), return_exceptions=True)
+    candidates = [r for r in rows if isinstance(r, dict)]
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda d: int(d.get("score", 0)))
+    return {
+        "latitude": best["latitude"],
+        "longitude": best["longitude"],
+        "score": int(best["score"]),
+        "reason": _OPTIMAL_COORD_REASON,
+        "distance_km_from_origin": best.get("distance_km_from_origin"),
+        "maps_url": best.get("maps_url"),
+    }
+
+
+def find_optimal_coordinates(
+    origin_latitude: float,
+    origin_longitude: float,
+    radius_km: float,
+    target: str,
+    *,
+    max_grid_points: int = 18,
+) -> Dict[str, Any] | None:
+    """Sync entry for callers outside an event loop (e.g. ai_search)."""
+    try:
+        return asyncio.run(
+            find_optimal_coordinates_async(
+                origin_latitude,
+                origin_longitude,
+                radius_km,
+                target,
+                max_grid_points=max_grid_points,
+            )
+        )
+    except RuntimeError:
+        return None
+
+
+async def _evaluate_point_async(
+    place: Dict[str, Any],
+    date: str,
+    time: str,
+    target: str,
+    origin_latitude: float,
+    origin_longitude: float,
+) -> Dict[str, Any] | None:
+    """Best-effort async evaluator; returns None on per-place failure."""
+    try:
+        latitude = float(place["latitude"])
+        longitude = float(place["longitude"])
+        scored = await _compute_visibility_score_at_async(
+            latitude, longitude, date, time, target
+        )
+        if scored is None:
+            return None
+        score, weather, light_pollution = scored[0], scored[1], scored[3]
+        maps_url = f"https://www.google.com/maps/search/?api=1&query={latitude},{longitude}"
+        navigation = await asyncio.to_thread(
+            _google_directions, origin_latitude, origin_longitude, latitude, longitude
+        )
+        bortle_class = int(light_pollution.get("bortle_class", 5))
+        return {
+            "name": place.get("name"),
+            "latitude": latitude,
+            "longitude": longitude,
+            "distance_km": float(place.get("distance_km", _haversine_km(origin_latitude, origin_longitude, latitude, longitude))),
+            "score": int(score),
+            "address": place.get("address"),
+            "maps_url": maps_url,
+            "navigation": navigation,
+            "reason": "Lower light pollution and better sky clarity",
+            "source": place.get("source") or "OpenStreetMap Overpass",
+            "bortle_class": bortle_class,
+            "weather_snapshot": {
+                "cloud_cover": weather.get("cloud_cover"),
+                "condition": weather.get("condition"),
+            },
+        }
+    except Exception:
+        return None
+
+
+async def get_nearby_dark_locations_async(
+    latitude: float,
+    longitude: float,
+    radius_km: int,
+    target: str,
+    *,
+    max_places: int = 10,
+) -> List[Dict[str, Any]]:
+    date = datetime.utcnow().strftime("%Y-%m-%d")
+    time = "23:00"
+    places = await asyncio.to_thread(_fetch_real_places, latitude, longitude, radius_km)
+    if not places:
+        return []
+    places = places[: max(1, min(max_places, 10))]
+    semaphore = asyncio.Semaphore(10)
+
+    async def guarded(place: Dict[str, Any]) -> Dict[str, Any] | None:
+        async with semaphore:
+            try:
+                return await asyncio.wait_for(
+                    _evaluate_point_async(place, date, time, target, latitude, longitude),
+                    timeout=4.5,
+                )
+            except asyncio.TimeoutError:
+                return None
+
+    rows = await asyncio.gather(*(guarded(p) for p in places), return_exceptions=True)
+    evaluated = [r for r in rows if isinstance(r, dict)]
+    evaluated.sort(key=lambda item: item.get("score", 0), reverse=True)
+    return evaluated
+
+
 def list_real_named_places(
     latitude: float,
     longitude: float,
@@ -370,36 +712,40 @@ def get_nearby_dark_locations(
     radius_km: int,
     target: str,
 ) -> List[Dict[str, Any]]:
-    date = datetime.utcnow().strftime("%Y-%m-%d")
-    time = "23:00"
-    places = _fetch_real_places(latitude, longitude, radius_km)
-    if not places:
-        return []
-
-    # Each point hits 4 upstream services - running them sequentially
-    # was the dominant cost in /api/nearby. Fan out across points.
-    tasks = {
-        f"{idx}:{p['latitude']:.4f},{p['longitude']:.4f}": (
-            lambda place=p: _evaluate_point(
-                place["latitude"],
-                place["longitude"],
-                date,
-                time,
-                target,
-                place["distance_km"],
-                place["name"],
-                place["type"],
-                place["tags"],
-                source=str(place.get("source") or "OpenStreetMap Overpass"),
-                address=place.get("address"),
-                origin_latitude=latitude,
-                origin_longitude=longitude,
+    try:
+        return asyncio.run(
+            get_nearby_dark_locations_async(
+                latitude, longitude, radius_km, target, max_places=10
             )
         )
-        for idx, p in enumerate(places)
-    }
-    results = parallel.gather(tasks)
-    evaluated: List[Dict[str, Any]] = [v for v in results.values() if v is not None]
-
-    evaluated.sort(key=lambda item: item["score"], reverse=True)
-    return evaluated
+    except RuntimeError:
+        # Fallback for environments that already have a running event loop.
+        date = datetime.utcnow().strftime("%Y-%m-%d")
+        time = "23:00"
+        places = _fetch_real_places(latitude, longitude, radius_km)[:10]
+        if not places:
+            return []
+        tasks = {
+            f"{idx}:{p['latitude']:.4f},{p['longitude']:.4f}": (
+                lambda place=p: _evaluate_point(
+                    place["latitude"],
+                    place["longitude"],
+                    date,
+                    time,
+                    target,
+                    place["distance_km"],
+                    place["name"],
+                    place["type"],
+                    place["tags"],
+                    source=str(place.get("source") or "OpenStreetMap Overpass"),
+                    address=place.get("address"),
+                    origin_latitude=latitude,
+                    origin_longitude=longitude,
+                )
+            )
+            for idx, p in enumerate(places)
+        }
+        results = parallel.gather(tasks)
+        evaluated: List[Dict[str, Any]] = [v for v in results.values() if v is not None]
+        evaluated.sort(key=lambda item: item["score"], reverse=True)
+        return evaluated

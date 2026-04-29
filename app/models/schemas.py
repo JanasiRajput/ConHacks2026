@@ -40,6 +40,7 @@ class PlanResponse(BaseModel):
     camera_settings: Dict[str, Any]
     ai_insight: Optional[Dict[str, Any]] = None
     data_sources: Optional[Dict[str, Any]] = None
+    best_nearby_spot: Optional[Dict[str, Any]] = None
     recommendation: str
     ai_summary: str
     breakdown: Dict[str, Any]
@@ -79,18 +80,11 @@ class NearbyRequest(BaseModel):
 
 
 class NearbyResponse(BaseModel):
-    current_location_score: int
-    best_locations: List[Dict[str, Any]]
-    recommended_locations: Optional[List[Dict[str, Any]]] = None
-    candidate_locations: Optional[List[Dict[str, Any]]] = None
-    pin_location: Optional[Dict[str, Any]] = None
     best_spot: Optional[Dict[str, Any]] = None
-    alternatives: Optional[List[Dict[str, Any]]] = None
-    note: Optional[str] = None
-    recommendation: str
+    optimal_coordinates: Optional[Dict[str, Any]] = None
+    alternatives: List[Dict[str, Any]] = Field(default_factory=list)
     message: Optional[str] = None
-    suggestion: Optional[str] = None
-    data_sources: Optional[Dict[str, Any]] = None
+    note: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

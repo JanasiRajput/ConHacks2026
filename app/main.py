@@ -16,7 +16,18 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.routes import ai_search, astronomy, aurora, events, future, nearby, planner, sky, upcoming_moments
+from app.routes import (
+    ai_search,
+    astronomy,
+    aurora,
+    events,
+    future,
+    location_search,
+    nearby,
+    planner,
+    sky,
+    upcoming_moments,
+)
 
 
 logger = logging.getLogger("skylens.validation")
@@ -49,6 +60,7 @@ app.include_router(aurora.router, prefix="/api")
 app.include_router(events.router, prefix="/api")
 app.include_router(upcoming_moments.router, prefix="/api")
 app.include_router(ai_search.router, prefix="/api")
+app.include_router(location_search.router, prefix="/api")
 
 
 @app.exception_handler(RequestValidationError)
