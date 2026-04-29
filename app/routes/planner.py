@@ -10,6 +10,7 @@ from app.services import (
     astronomy_service,
     aurora_service,
     light_pollution_service,
+    location_service,
     scoring_service,
     sky_events_service,
     weather_service,
@@ -42,23 +43,27 @@ def _recommendation_for(score: int) -> str:
 @router.post("/plan", response_model=PlanResponse)
 def create_plan(request: PlanRequest) -> PlanResponse:
     try:
+        latitude, longitude, location_name = location_service.resolve_location(
+            request.latitude, request.longitude, request.location_name
+        )
+
         weather = weather_service.get_weather_data(
-            request.latitude, request.longitude, request.date, request.time
+            latitude, longitude, request.date, request.time
         )
         astronomy = astronomy_service.get_astronomy_data(
-            request.latitude, request.longitude, request.date, request.time
+            latitude, longitude, request.date, request.time
         )
         light_pollution = light_pollution_service.get_light_pollution_data(
-            request.latitude, request.longitude
+            latitude, longitude
         )
-        aurora = aurora_service.get_aurora_data(request.latitude, request.longitude)
+        aurora = aurora_service.get_aurora_data(latitude, longitude)
 
         score, breakdown = scoring_service.calculate_score(
             weather, astronomy, light_pollution, aurora, request.target
         )
 
         sky_events = sky_events_service.get_sky_events(
-            astronomy, request.date, request.latitude
+            astronomy, request.date, latitude
         )
 
         camera_settings = scoring_service.get_camera_settings(request.target, score)
@@ -71,7 +76,7 @@ def create_plan(request: PlanRequest) -> PlanResponse:
             sky_quality=scoring_service.get_sky_quality(score),
             best_window=_best_window_for(request.target),
             target=request.target,
-            location_name=request.location_name or "Unknown Location",
+            location_name=location_name,
             date=request.date,
             time=request.time,
             weather=weather,

@@ -13,6 +13,7 @@ from app.services import (
     astronomy_service,
     aurora_service,
     light_pollution_service,
+    location_service,
     scoring_service,
     weather_service,
 )
@@ -67,6 +68,10 @@ def _evaluate(
 @router.post("/future", response_model=FutureResponse)
 def predict_future(request: FutureRequest) -> FutureResponse:
     try:
+        latitude, longitude, _ = location_service.resolve_location(
+            request.latitude, request.longitude, request.location_name
+        )
+
         days = max(1, min(30, int(request.days)))
         try:
             start = datetime.utcnow().date()
@@ -80,8 +85,8 @@ def predict_future(request: FutureRequest) -> FutureResponse:
             for window in _TIME_WINDOWS:
                 results.append(
                     _evaluate(
-                        request.latitude,
-                        request.longitude,
+                        latitude,
+                        longitude,
                         date_str,
                         window,
                         request.target,

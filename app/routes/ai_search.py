@@ -28,6 +28,7 @@ from app.services import (
     ai_explanation_service,
     astronomy_service,
     gemini_service,
+    location_service,
     sky_events_service,
 )
 
@@ -161,7 +162,10 @@ def _resolve_date(token: str) -> str:
 
 
 def _route_to_backend(
-    request: AISearchRequest, parsed: Dict[str, Any]
+    parsed: Dict[str, Any],
+    latitude: float,
+    longitude: float,
+    location_name: str,
 ) -> Tuple[str, Dict[str, Any]]:
     """Run the parsed query through the existing services."""
     intent = parsed["intent"]
@@ -172,14 +176,19 @@ def _route_to_backend(
     if intent == "visibility" and date_token in ("today", "tomorrow"):
         date_str = _resolve_date(date_token)
         astronomy = astronomy_service.get_astronomy_data(
-            request.latitude, request.longitude, date_str, parsed["time"]
+            latitude, longitude, date_str, parsed["time"]
         )
         events = sky_events_service.get_sky_events(
-            astronomy, date_str, request.latitude
+            astronomy, date_str, latitude
         )
         return "sky_events", {
             "date": date_str,
             "time": parsed["time"],
+            "location": {
+                "name": location_name,
+                "latitude": latitude,
+                "longitude": longitude,
+            },
             "astronomy": astronomy,
             "sky_events": events,
         }
@@ -190,8 +199,8 @@ def _route_to_backend(
         future = predict_future(
             FutureRequest(
                 location_name="Your Location",
-                latitude=request.latitude,
-                longitude=request.longitude,
+                latitude=latitude,
+                longitude=longitude,
                 target=parsed["target"],
                 days=days,
             )
@@ -202,9 +211,9 @@ def _route_to_backend(
     date_str = _resolve_date(date_token)
     plan = create_plan(
         PlanRequest(
-            location_name="Your Location",
-            latitude=request.latitude,
-            longitude=request.longitude,
+            location_name=location_name,
+            latitude=latitude,
+            longitude=longitude,
             date=date_str,
             time=parsed["time"],
             target=parsed["target"],
@@ -275,8 +284,11 @@ def _fallback_answer(parsed: Dict[str, Any], data: Dict[str, Any], route: str) -
 @router.post("/ai-search", response_model=AISearchResponse)
 def ai_search(request: AISearchRequest) -> AISearchResponse:
     try:
+        latitude, longitude, location_name = location_service.resolve_location(
+            request.latitude, request.longitude, request.location_name
+        )
         parsed = _parse_query(request.query)
-        route, data = _route_to_backend(request, parsed)
+        route, data = _route_to_backend(parsed, latitude, longitude, location_name)
 
         # Pull a representative score for the confidence calculation.
         if route == "future":
