@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.models.schemas import EventsRequest, EventsResponse
 from app.services import astronomy_service, aurora_service, sky_events_service
+from app.services.data_sources import build_data_sources
 
 
 router = APIRouter(tags=["events"])
@@ -45,7 +46,15 @@ def _build_summary(astronomy: dict, sky_events: dict, aurora: dict) -> str:
     return " ".join(parts)
 
 
-@router.post("/events", response_model=EventsResponse)
+@router.post(
+    "/events",
+    response_model=EventsResponse,
+    summary="Visible Sky Events",
+    description=(
+        "Show what planets, famous stars, constellations, Milky Way, or aurora may be visible "
+        "for a selected date/time. Best for: 'What can I see tonight?'"
+    ),
+)
 def whats_up_tonight(request: EventsRequest) -> EventsResponse:
     try:
         astronomy = astronomy_service.get_astronomy_data(
@@ -68,6 +77,12 @@ def whats_up_tonight(request: EventsRequest) -> EventsResponse:
             sky_events=sky_events,
             aurora=aurora,
             summary=_build_summary(astronomy, sky_events, aurora),
+            data_sources=build_data_sources(
+                weather_status="not_used",
+                aurora_status=("fallback" if aurora.get("source") == "fallback" else "live"),
+                nearby_status="not_used",
+                ai_status=None,
+            ),
         )
     except HTTPException:
         raise

@@ -1,8 +1,9 @@
 """Scoring engine.
 
 Combines weather, astronomy, light pollution and aurora data into a
-0-100 visibility score. The formula is target-agnostic; camera
-recommendations still vary by target.
+0-100 visibility score. The base components are shared, but final
+weighting is target-aware so moon/planets/stars/milky-way/aurora do not
+collapse to nearly identical scores under the same conditions.
 
 Final weighted formula:
     35% cloud
@@ -18,13 +19,56 @@ from __future__ import annotations
 from typing import Any, Dict, Tuple
 
 
-_WEIGHTS = {
+_BASE_WEIGHTS = {
     "cloud": 0.35,
     "light_pollution": 0.25,
     "moon": 0.20,
     "darkness": 0.10,
     "atmosphere": 0.05,
     "bonus": 0.05,
+}
+
+_TARGET_WEIGHTS = {
+    "milky_way": {
+        "cloud": 0.34,
+        "light_pollution": 0.30,
+        "moon": 0.22,
+        "darkness": 0.08,
+        "atmosphere": 0.04,
+        "bonus": 0.02,
+    },
+    "stars": {
+        "cloud": 0.36,
+        "light_pollution": 0.28,
+        "moon": 0.18,
+        "darkness": 0.10,
+        "atmosphere": 0.06,
+        "bonus": 0.02,
+    },
+    "planets": {
+        "cloud": 0.48,
+        "light_pollution": 0.10,
+        "moon": 0.08,
+        "darkness": 0.10,
+        "atmosphere": 0.14,
+        "bonus": 0.10,
+    },
+    "moon": {
+        "cloud": 0.55,
+        "light_pollution": 0.03,
+        "moon": 0.00,
+        "darkness": 0.02,
+        "atmosphere": 0.20,
+        "bonus": 0.20,
+    },
+    "aurora": {
+        "cloud": 0.34,
+        "light_pollution": 0.12,
+        "moon": 0.16,
+        "darkness": 0.10,
+        "atmosphere": 0.08,
+        "bonus": 0.20,
+    },
 }
 
 
@@ -115,6 +159,92 @@ def _bonus_score(astronomy: Dict[str, Any], aurora: Dict[str, Any]) -> Tuple[flo
     return bonus_score, planet_bonus, aurora_bonus
 
 
+def _normalize_target(target: str) -> str:
+    t = (target or "").strip().lower().replace("-", "_")
+    if t in {"milky", "milkyway"}:
+        return "milky_way"
+    if t not in _TARGET_WEIGHTS:
+        return "stars"
+    return t
+
+
+def _target_weight_profile(target: str) -> Dict[str, float]:
+    return _TARGET_WEIGHTS.get(_normalize_target(target), _BASE_WEIGHTS)
+
+
+def _target_adjustment(
+    target: str,
+    weather: Dict[str, Any],
+    astronomy: Dict[str, Any],
+    light_pollution: Dict[str, Any],
+    aurora: Dict[str, Any],
+) -> Tuple[float, Dict[str, float]]:
+    """Small target-specific adjustment (+/-) layered on weighted score."""
+    t = _normalize_target(target)
+    cloud = float(weather.get("cloud_cover", 50) or 50)
+    moon_illum = float(astronomy.get("moon_illumination", 0) or 0)
+    moon_alt = float(astronomy.get("moon_altitude", 0) or 0)
+    sun_alt = float(astronomy.get("sun_altitude", 0) or 0)
+    bortle = int(light_pollution.get("bortle_class", 5) or 5)
+    aurora_chance = str((aurora or {}).get("aurora_chance") or "Low")
+    planets_visible = any(bool(p.get("visible")) for p in (astronomy.get("planets") or []))
+    milky_visible = bool(astronomy.get("milky_way_visible"))
+
+    delta = 0.0
+    factors: Dict[str, float] = {}
+    if t == "moon":
+        if moon_alt > 20:
+            delta += 8.0
+            factors["moon_altitude_bonus"] = 8.0
+        elif moon_alt < 0:
+            delta -= 20.0
+            factors["moon_below_horizon_penalty"] = -20.0
+        if cloud > 75:
+            delta -= 10.0
+            factors["heavy_cloud_penalty"] = -10.0
+    elif t == "planets":
+        if planets_visible:
+            delta += 12.0
+            factors["planets_visible_bonus"] = 12.0
+        if cloud > 80:
+            delta -= 14.0
+            factors["heavy_cloud_penalty"] = -14.0
+    elif t == "milky_way":
+        if milky_visible:
+            delta += 10.0
+            factors["milky_visible_bonus"] = 10.0
+        else:
+            delta -= 12.0
+            factors["milky_not_visible_penalty"] = -12.0
+        if moon_alt > 0 and moon_illum > 60:
+            delta -= 10.0
+            factors["bright_moon_penalty"] = -10.0
+        if bortle <= 3:
+            delta += 6.0
+            factors["dark_site_bonus"] = 6.0
+    elif t == "aurora":
+        if aurora_chance == "High":
+            delta += 14.0
+            factors["aurora_high_bonus"] = 14.0
+        elif aurora_chance == "Medium":
+            delta += 7.0
+            factors["aurora_medium_bonus"] = 7.0
+        else:
+            delta -= 6.0
+            factors["aurora_low_penalty"] = -6.0
+        if sun_alt > -6:
+            delta -= 8.0
+            factors["too_bright_sky_penalty"] = -8.0
+    else:  # stars
+        if sun_alt < -12:
+            delta += 4.0
+            factors["dark_sky_bonus"] = 4.0
+        if moon_alt > 0 and moon_illum > 80:
+            delta -= 8.0
+            factors["bright_moon_penalty"] = -8.0
+    return delta, factors
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -132,14 +262,20 @@ def calculate_score(
     atmosphere = _atmosphere_score(weather)
     bonus, planet_bonus, aurora_bonus = _bonus_score(astronomy, aurora)
 
-    final = (
-        cloud * _WEIGHTS["cloud"]
-        + light * _WEIGHTS["light_pollution"]
-        + moon * _WEIGHTS["moon"]
-        + darkness * _WEIGHTS["darkness"]
-        + atmosphere * _WEIGHTS["atmosphere"]
-        + bonus * _WEIGHTS["bonus"]
+    target_key = _normalize_target(target)
+    weights = _target_weight_profile(target_key)
+    base = (
+        cloud * weights["cloud"]
+        + light * weights["light_pollution"]
+        + moon * weights["moon"]
+        + darkness * weights["darkness"]
+        + atmosphere * weights["atmosphere"]
+        + bonus * weights["bonus"]
     )
+    adjustment, adjustment_factors = _target_adjustment(
+        target_key, weather, astronomy, light_pollution, aurora
+    )
+    final = base + adjustment
     final_int = int(round(max(0.0, min(100.0, final))))
 
     breakdown = {
@@ -151,8 +287,11 @@ def calculate_score(
         "bonus_score": round(bonus, 2),
         "planet_bonus": planet_bonus,
         "aurora_bonus": aurora_bonus,
+        "target": target_key,
+        "target_adjustment": round(adjustment, 2),
+        "target_factors": adjustment_factors,
         "final_score": final_int,
-        "weights": _WEIGHTS,
+        "weights": weights,
     }
     return final_int, breakdown
 
