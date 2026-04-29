@@ -167,45 +167,171 @@ def get_sky_quality(score: int) -> str:
     return "Poor"
 
 
-def get_camera_settings(target: str, score: int) -> Dict[str, Any]:
-    """Baseline camera recommendations for the chosen target."""
-    if target == "milky_way":
-        settings = {
-            "lens": "14-24mm wide angle",
-            "aperture": "f/2.8 or lower",
-            "iso": 3200,
-            "shutter_speed": "15-25 seconds",
-            "tripod": True,
-            "notes": "Use the 500-rule to avoid star trails. Manual focus on a bright star.",
-        }
-    elif target == "moon":
-        settings = {
-            "lens": "200mm or longer telephoto",
-            "aperture": "f/8",
-            "iso": "100-400",
-            "shutter_speed": "1/125s",
-            "tripod": True,
-            "notes": "Spot-meter on the lit limb. Use mirror lockup or electronic shutter.",
-        }
-    elif target == "aurora":
-        settings = {
-            "lens": "14-24mm wide angle",
-            "aperture": "f/2.8",
-            "iso": "1600-3200",
-            "shutter_speed": "5-15 seconds",
-            "tripod": True,
-            "notes": "Shorter shutter when the aurora is dancing fast; drop ISO if it's bright.",
-        }
-    else:
-        settings = {
-            "lens": "24-35mm",
-            "aperture": "f/2.8",
-            "iso": 1600,
-            "shutter_speed": "10-20 seconds",
-            "tripod": True,
-            "notes": "General night-sky baseline. Adjust to taste.",
-        }
+def get_camera_settings(
+    target: str,
+    score: int,
+    light_pollution: Dict[str, Any] | None = None,
+    astronomy: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Camera settings derived from real conditions.
 
-    if score < 50:
-        settings["warning"] = "Conditions are poor; consider rescheduling."
-    return settings
+    Inputs:
+      - target: 'milky_way', 'moon', 'aurora', 'stars', 'planets'
+      - score: 0-100 visibility score
+      - light_pollution: payload from light_pollution_service (Bortle, etc.)
+      - astronomy: payload from astronomy_service (moon altitude/illumination)
+
+    The result is a dict with concrete numbers (ISO, shutter, aperture,
+    focal length) computed from those inputs rather than hardcoded.
+    """
+    light_pollution = light_pollution or {}
+    astronomy = astronomy or {}
+
+    bortle = int(light_pollution.get("bortle_class", 5) or 5)
+    bortle = max(1, min(9, bortle))
+    moon_illumination = float(astronomy.get("moon_illumination", 0) or 0)
+    moon_altitude = float(astronomy.get("moon_altitude", 0) or 0)
+    moon_brightness = moon_illumination if moon_altitude > 0 else 0.0
+
+    target_norm = (target or "").replace("_", "").lower()
+    if target_norm in ("milkyway", "milky"):
+        return _milkyway_settings(bortle, moon_brightness, score)
+    if target_norm == "moon":
+        return _moon_settings(moon_illumination, score)
+    if target_norm == "aurora":
+        return _aurora_settings(bortle, moon_brightness, score)
+    if target_norm == "planets":
+        return _planet_settings(score)
+    if target_norm == "stars":
+        return _stars_settings(bortle, moon_brightness, score)
+    return _stars_settings(bortle, moon_brightness, score)
+
+
+def _500_rule_seconds(focal_length_mm: float, latitude_deg: float | None = None) -> float:
+    """Classic 500-rule: max exposure for trail-free stars at given focal length.
+
+    Adjusts loosely for declination via cos(latitude) when provided.
+    """
+    base = 500.0 / max(1.0, focal_length_mm)
+    if latitude_deg is None:
+        return base
+    import math
+    factor = max(0.5, math.cos(math.radians(latitude_deg)))
+    return base * factor
+
+
+def _milkyway_settings(bortle: int, moon_brightness: float, score: int) -> Dict[str, Any]:
+    # ISO scales with darkness: darker sky => longer exposure tolerable, lower ISO needed.
+    iso_table = {1: 1600, 2: 1600, 3: 2000, 4: 2500, 5: 3200, 6: 4000, 7: 5000, 8: 6400, 9: 6400}
+    iso = iso_table[bortle]
+    if moon_brightness > 60:
+        iso = max(800, int(iso * 0.5))
+    elif moon_brightness > 30:
+        iso = max(800, int(iso * 0.7))
+
+    focal = 20.0  # mm
+    shutter_s = round(_500_rule_seconds(focal), 1)
+
+    return {
+        "target": "milky_way",
+        "lens": "14-24mm wide angle",
+        "focal_length_mm": int(focal),
+        "aperture": "f/2.8",
+        "iso": iso,
+        "shutter_speed": f"{shutter_s:.0f}s",
+        "shutter_seconds": shutter_s,
+        "tripod": True,
+        "notes": (
+            f"Tuned for Bortle {bortle} sky"
+            f"{' with bright moon' if moon_brightness > 30 else ''}."
+            " Use the 500-rule to avoid star trails. Manual focus on a bright star."
+        ),
+        **({"warning": "Conditions are poor; consider rescheduling."} if score < 50 else {}),
+    }
+
+
+def _moon_settings(moon_illumination: float, score: int) -> Dict[str, Any]:
+    # Looney-11 rule, adjusted for phase.
+    aperture_f = 11.0
+    base_iso = 100
+    # Less illuminated moon needs longer shutter or higher ISO.
+    illum_factor = max(0.1, moon_illumination / 100.0)
+    shutter_s = max(1 / 1000.0, (1.0 / 125.0) / illum_factor)
+    return {
+        "target": "moon",
+        "lens": "200mm or longer telephoto",
+        "focal_length_mm": 300,
+        "aperture": f"f/{aperture_f:.0f}",
+        "iso": base_iso,
+        "shutter_speed": f"1/{int(round(1.0 / shutter_s))}s" if shutter_s < 1 else f"{shutter_s:.1f}s",
+        "shutter_seconds": round(shutter_s, 4),
+        "tripod": True,
+        "notes": (
+            f"Looney-11 baseline tuned to {moon_illumination:.0f}% illumination."
+            " Spot-meter on the lit limb. Mirror lockup or electronic shutter recommended."
+        ),
+        **({"warning": "Moon is low or hidden; reposition."} if score < 50 else {}),
+    }
+
+
+def _aurora_settings(bortle: int, moon_brightness: float, score: int) -> Dict[str, Any]:
+    iso = 3200 if bortle <= 4 else 2500
+    if moon_brightness > 30:
+        iso = max(1600, int(iso * 0.7))
+
+    # Faster shutter for active aurora; slower for calm.
+    shutter_s = 8.0 if score < 70 else 4.0
+
+    return {
+        "target": "aurora",
+        "lens": "14-24mm wide angle",
+        "focal_length_mm": 20,
+        "aperture": "f/2.8",
+        "iso": iso,
+        "shutter_speed": f"{shutter_s:.0f}s",
+        "shutter_seconds": shutter_s,
+        "tripod": True,
+        "notes": (
+            "Shorten shutter when aurora is dancing fast; drop ISO if it gets bright."
+            f" Bortle {bortle} environment."
+        ),
+        **({"warning": "Aurora odds are low; check the Kp index."} if score < 50 else {}),
+    }
+
+
+def _planet_settings(score: int) -> Dict[str, Any]:
+    return {
+        "target": "planets",
+        "lens": "Telescope or 600mm+ telephoto",
+        "focal_length_mm": 1500,
+        "aperture": "f/10",
+        "iso": 800,
+        "shutter_speed": "1/60s",
+        "shutter_seconds": 1 / 60.0,
+        "tripod": True,
+        "notes": "Use a tracking mount and a Barlow if available. Stack frames for detail.",
+        **({"warning": "Seeing may be poor; check the sky score."} if score < 50 else {}),
+    }
+
+
+def _stars_settings(bortle: int, moon_brightness: float, score: int) -> Dict[str, Any]:
+    iso = max(800, min(6400, 800 * (2 ** max(0, bortle - 3))))
+    if moon_brightness > 30:
+        iso = max(800, int(iso * 0.6))
+    focal = 24.0
+    shutter_s = round(_500_rule_seconds(focal), 1)
+    return {
+        "target": "stars",
+        "lens": "24-35mm",
+        "focal_length_mm": int(focal),
+        "aperture": "f/2.8",
+        "iso": iso,
+        "shutter_speed": f"{shutter_s:.0f}s",
+        "shutter_seconds": shutter_s,
+        "tripod": True,
+        "notes": (
+            f"Tuned for Bortle {bortle}. Manual focus on a bright star."
+            " Adjust ISO if histogram is too far left or right."
+        ),
+        **({"warning": "Conditions are poor; consider rescheduling."} if score < 50 else {}),
+    }

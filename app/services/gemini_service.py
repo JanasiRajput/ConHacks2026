@@ -30,11 +30,13 @@ _API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
 def _api_key() -> Optional[str]:
-    return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    raw = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    return raw.strip() if raw else None
 
 
 def _model() -> str:
-    return os.environ.get("GEMINI_MODEL", _DEFAULT_MODEL)
+    raw = os.environ.get("GEMINI_MODEL") or _DEFAULT_MODEL
+    return raw.strip() or _DEFAULT_MODEL
 
 
 def is_configured() -> bool:

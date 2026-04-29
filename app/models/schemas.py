@@ -6,7 +6,7 @@ Response keys here are stable - downstream clients depend on them.
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 # ---------------------------------------------------------------------------
@@ -14,8 +14,8 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 class PlanRequest(BaseModel):
     location_name: Optional[str] = "Unknown Location"
-    latitude: float
-    longitude: float
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     date: str
     time: str
     target: str = "milky_way"
@@ -25,6 +25,7 @@ class PlanResponse(BaseModel):
     visibility_score: int
     sky_quality: str
     best_window: str
+    best_window_detail: Optional[Dict[str, Any]] = None
     target: str
     location_name: str
     date: str
@@ -45,8 +46,8 @@ class PlanResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class FutureRequest(BaseModel):
     location_name: Optional[str] = "Unknown Location"
-    latitude: float
-    longitude: float
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     target: str = "milky_way"
     days: int = 7
 
@@ -65,15 +66,17 @@ class FutureResponse(BaseModel):
 # /api/nearby
 # ---------------------------------------------------------------------------
 class NearbyRequest(BaseModel):
-    latitude: float
-    longitude: float
+    location_name: Optional[str] = "Unknown Location"
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     radius_km: int = 150
     target: str = "milky_way"
 
 
 class NearbyResponse(BaseModel):
     current_location_score: int
-    recommended_locations: List[Dict[str, Any]]
+    best_locations: List[Dict[str, Any]]
+    recommended_locations: Optional[List[Dict[str, Any]]] = None
     recommendation: str
 
 
@@ -93,6 +96,23 @@ class SkyResponse(BaseModel):
     sun: Dict[str, Any]
     milky_way: Dict[str, Any]
     sky_conditions: Dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
+# /api/astronomy - raw astronomy payload (service output)
+# ---------------------------------------------------------------------------
+class AstronomyRequest(BaseModel):
+    latitude: float
+    longitude: float
+    date: str
+    time: str
+
+
+class AstronomyResponse(BaseModel):
+    date: str
+    time: str
+    location: Dict[str, float]
+    astronomy: Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +156,9 @@ class EventsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class AISearchRequest(BaseModel):
     query: str
-    latitude: float
-    longitude: float
+    location_name: Optional[str] = "Unknown Location"
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 class AISearchResponse(BaseModel):
@@ -147,27 +168,3 @@ class AISearchResponse(BaseModel):
     parsed: Dict[str, Any]
     route: str
     ai_source: str
-
-
-# ---------------------------------------------------------------------------
-# /api/weather/nearby - weather-only nearby recommendations
-# ---------------------------------------------------------------------------
-class WeatherNearbyLocation(BaseModel):
-    name: str
-    latitude: float
-    longitude: float
-    distance_km: float
-    weather_score: int = Field(..., ge=0, le=100)
-    cloud_cover: int = Field(..., ge=0, le=100)
-    visibility_km: float = Field(..., ge=0)
-    humidity: int = Field(..., ge=0, le=100)
-    wind_speed_kmh: float = Field(..., ge=0)
-    condition: str
-
-
-class WeatherNearbyResponse(BaseModel):
-    requested_location: Dict[str, float]
-    date: str
-    time: str
-    best_location: Optional[WeatherNearbyLocation] = None
-    recommendations: List[WeatherNearbyLocation]

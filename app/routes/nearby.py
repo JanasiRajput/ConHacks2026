@@ -1,74 +1,99 @@
-"""POST /api/nearby - nearby dark-sky finder."""
+"""POST /api/nearby - nearby weather-based location finder."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app.models.schemas import NearbyRequest, NearbyResponse
-from app.services import (
-    astronomy_service,
-    aurora_service,
-    light_pollution_service,
-    nearby_service,
-    scoring_service,
-    weather_service,
-)
+from app.services import location_service, weather_recommendation_service, weather_service
 
 
 router = APIRouter(tags=["nearby"])
 
 
-def _current_location_score(request: NearbyRequest) -> int:
-    """Use a default night window to estimate the score where the user is now."""
+def _current_location_score(
+    latitude: float,
+    longitude: float,
+    target: str,
+) -> int:
+    """Use a default night window to estimate weather-only score where user is now."""
+    _ = target
     today = datetime.utcnow().strftime("%Y-%m-%d")
     time = "23:00"
-    weather = weather_service.get_weather_data(
-        request.latitude, request.longitude, today, time
-    )
-    astronomy = astronomy_service.get_astronomy_data(
-        request.latitude, request.longitude, today, time
-    )
-    light_pollution = light_pollution_service.get_light_pollution_data(
-        request.latitude, request.longitude
-    )
-    aurora = aurora_service.get_aurora_data(request.latitude, request.longitude)
-    score, _ = scoring_service.calculate_score(
-        weather, astronomy, light_pollution, aurora, request.target
-    )
-    return score
+    weather = weather_service.get_weather_data(latitude, longitude, today, time)
+    return weather_recommendation_service.compute_weather_score(weather)
+
+
+def _to_nearby_shape(weather_results: list[dict]) -> list[dict]:
+    nearby_results: list[dict] = []
+    for item in weather_results:
+        nearby_results.append(
+            {
+                "name": item["name"],
+                "latitude": item["latitude"],
+                "longitude": item["longitude"],
+                "distance_km": item["distance_km"],
+                "score": item["weather_score"],
+                "reason": (
+                    f"Cloud cover {item['cloud_cover']}%, visibility {item['visibility_km']} km, "
+                    f"humidity {item['humidity']}%, wind {item['wind_speed_kmh']} km/h"
+                ),
+                "weather_snapshot": {
+                    "cloud_cover": item["cloud_cover"],
+                    "visibility_km": item["visibility_km"],
+                    "humidity": item["humidity"],
+                    "wind_speed_kmh": item["wind_speed_kmh"],
+                    "condition": item["condition"],
+                },
+            }
+        )
+    return nearby_results
 
 
 @router.post("/nearby", response_model=NearbyResponse)
-def find_nearby(request: NearbyRequest) -> NearbyResponse:
+def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyResponse:
     try:
-        current_score = _current_location_score(request)
-        locations = nearby_service.get_nearby_dark_locations(
+        client_ip = http_request.client.host if http_request.client else None
+        latitude, longitude, _ = location_service.resolve_location(
             request.latitude,
             request.longitude,
-            request.radius_km,
-            request.target,
+            request.location_name,
+            client_ip=client_ip,
         )
 
+        current_score = _current_location_score(latitude, longitude, request.target)
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        weather_results = weather_recommendation_service.get_weather_based_recommendations(
+            latitude=latitude,
+            longitude=longitude,
+            date=today,
+            time="23:00",
+            radius_km=request.radius_km,
+            limit=5,
+        )
+        locations = _to_nearby_shape(weather_results)
+
         if not locations:
-            recommendation = "No darker sites found in range; stay where you are tonight."
+            recommendation = "No weather-favorable sites found in range right now."
         else:
             best = locations[0]
-            if best["score"] > current_score + 10:
+            label = best.get("name") or f"({best['latitude']}, {best['longitude']})"
+            if best["score"] > current_score + 8:
                 recommendation = (
-                    f"Drive to {best['name']} ({best['distance_km']} km away) - "
-                    f"its estimated score of {best['score']}/100 is meaningfully "
-                    "better than your current spot."
+                    f"Try {label} ({best['distance_km']} km away) - "
+                    f"its weather score of {best['score']}/100 is better than your current spot."
                 )
             else:
                 recommendation = (
-                    "Your current location is competitive with nearby dark sites; "
-                    "save the drive unless you want a wider horizon."
+                    "Nearby locations have similar weather quality right now; "
+                    "staying at your current spot is reasonable."
                 )
 
         return NearbyResponse(
             current_location_score=current_score,
+            best_locations=locations,
             recommended_locations=locations,
             recommendation=recommendation,
         )

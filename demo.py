@@ -122,8 +122,11 @@ def main(base: str) -> int:
     })
     show("current location score", nearby["current_location_score"])
     section("Top recommendations")
-    for loc in nearby["recommended_locations"][:3]:
-        print(f"    {loc['name']:<45} {loc['distance_km']:>6.1f} km   Bortle {loc['estimated_bortle_class']}   score {loc['score']}")
+    locations = nearby.get("best_locations") or nearby.get("recommended_locations") or []
+    for loc in locations[:3]:
+        name = loc.get("name") or f"{loc['latitude']:.3f}, {loc['longitude']:.3f}"
+        bortle = loc.get("bortle_class", loc.get("estimated_bortle_class", "?"))
+        print(f"    {name:<45} {loc['distance_km']:>6.1f} km   Bortle {bortle}   score {loc['score']}")
     show("recommendation", nearby["recommendation"])
 
     banner("3D sky data  -  POST /api/sky")

@@ -46,7 +46,7 @@ def _candidate_locations(latitude: float, longitude: float) -> List[Dict[str, fl
     ]
 
 
-def _weather_score(weather: Dict[str, Any]) -> int:
+def compute_weather_score(weather: Dict[str, Any]) -> int:
     cloud_cover = max(0, min(100, int(weather.get("cloud_cover", 100))))
     humidity = max(0, min(100, int(weather.get("humidity", 100))))
     visibility_km = max(0.0, float(weather.get("visibility_km", 0.0)))
@@ -65,6 +65,7 @@ def get_weather_based_recommendations(
     longitude: float,
     date: str,
     time: str,
+    radius_km: int = 150,
     limit: int = 5,
 ) -> List[Dict[str, Any]]:
     candidates = _candidate_locations(latitude, longitude)
@@ -74,13 +75,16 @@ def get_weather_based_recommendations(
         lat = float(location["latitude"])
         lon = float(location["longitude"])
         weather = weather_service.get_weather_data(lat, lon, date, time)
-        score = _weather_score(weather)
+        distance_km = _haversine_km(latitude, longitude, lat, lon)
+        if distance_km > radius_km:
+            continue
+        score = compute_weather_score(weather)
         recommendations.append(
             {
                 "name": str(location["name"]),
                 "latitude": lat,
                 "longitude": lon,
-                "distance_km": _haversine_km(latitude, longitude, lat, lon),
+                "distance_km": distance_km,
                 "weather_score": score,
                 "cloud_cover": int(weather.get("cloud_cover", 100)),
                 "visibility_km": float(weather.get("visibility_km", 0.0)),
@@ -91,4 +95,6 @@ def get_weather_based_recommendations(
         )
 
     recommendations.sort(key=lambda item: item["weather_score"], reverse=True)
+    if not recommendations:
+        return []
     return recommendations[: max(1, min(limit, len(recommendations)))]
