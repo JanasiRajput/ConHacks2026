@@ -17,9 +17,18 @@ from app.services import (
     sky_events_service,
     weather_service,
 )
+from app.services.cache import TTLCache
+from app.services.parallel import gather
 
 
 router = APIRouter(tags=["planner"])
+
+
+# Memoise full /plan responses for ~60s. Keys round coords to ~110m so
+# tiny GPS jitter doesn't blow the cache, and capture every other input
+# verbatim. This is the difference between "<200ms time-slider scrub"
+# and "wait 5s every drag".
+_plan_cache: TTLCache = TTLCache(ttl_seconds=60.0, max_entries=256)
 
 
 def _recommendation_for(score: int) -> str:
@@ -32,6 +41,16 @@ def _recommendation_for(score: int) -> str:
     return "Poor conditions - consider rescheduling."
 
 
+def _cache_key(latitude: float, longitude: float, request: PlanRequest) -> tuple:
+    return (
+        round(latitude, 3),
+        round(longitude, 3),
+        request.date,
+        request.time,
+        request.target,
+    )
+
+
 @router.post("/plan", response_model=PlanResponse)
 def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
     try:
@@ -41,17 +60,34 @@ def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
             client_ip=client_ip,
         )
 
-        weather = weather_service.get_weather_data(
-            latitude, longitude, request.date, request.time
-        )
+        cache_key = _cache_key(latitude, longitude, request)
+        cached = _plan_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # Fan out the four independent slow upstreams in parallel. Total
+        # wall time becomes max(t1..t4) instead of sum(t1..t4); on a
+        # cold cache that's typically 2-3x faster.
+        upstream = gather({
+            "weather": lambda: weather_service.get_weather_data(
+                latitude, longitude, request.date, request.time
+            ),
+            "light_pollution": lambda: light_pollution_service.get_light_pollution_data(
+                latitude, longitude
+            ),
+            "aurora": lambda: aurora_service.get_aurora_data(latitude, longitude),
+            "air_quality": lambda: air_quality_service.get_air_quality(
+                latitude, longitude, request.date, request.time
+            ),
+        })
+        weather = upstream["weather"]
+        light_pollution = upstream["light_pollution"]
+        aurora = upstream["aurora"]
+        air_quality = upstream["air_quality"]
+
+        # Astronomy is a local Skyfield computation - fast, no need to
+        # parallelise.
         astronomy = astronomy_service.get_astronomy_data(
-            latitude, longitude, request.date, request.time
-        )
-        light_pollution = light_pollution_service.get_light_pollution_data(
-            latitude, longitude
-        )
-        aurora = aurora_service.get_aurora_data(latitude, longitude)
-        air_quality = air_quality_service.get_air_quality(
             latitude, longitude, request.date, request.time
         )
 
@@ -59,17 +95,24 @@ def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
             weather, astronomy, light_pollution, aurora, request.target
         )
 
-        sky_events = sky_events_service.get_sky_events(
-            astronomy=astronomy,
-            date=request.date,
-            latitude=latitude,
-            longitude=longitude,
-            time=request.time,
-        )
+        # Sky events + best window can also run together. Both are CPU
+        # bound (Skyfield) so threading still helps a little, but mostly
+        # the AI summary is what we're parallelising the next stage with.
+        derived = gather({
+            "sky_events": lambda: sky_events_service.get_sky_events(
+                astronomy=astronomy,
+                date=request.date,
+                latitude=latitude,
+                longitude=longitude,
+                time=request.time,
+            ),
+            "best_window": lambda: observation_window_service.compute_best_window(
+                latitude, longitude, request.date, request.target
+            ),
+        })
+        sky_events = derived["sky_events"] or {}
+        best_window = derived["best_window"]
 
-        best_window = observation_window_service.compute_best_window(
-            latitude, longitude, request.date, request.target
-        )
         best_window_str = (
             f"{best_window['start']} - {best_window['end']} ({best_window['reason']})"
             if best_window
@@ -79,33 +122,33 @@ def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
         camera_settings = scoring_service.get_camera_settings(
             request.target, score, light_pollution=light_pollution, astronomy=astronomy
         )
-        ai_response = ai_explanation_service.generate_ai_response(
-            {
-                "score": score,
-                "weather": weather,
-                "astronomy": astronomy,
-                "light_pollution": light_pollution,
-                "visible_objects": {
-                    "planets": [
-                        p.get("name")
-                        for p in (sky_events.get("visible_planets") or [])
-                        if p.get("name")
-                    ],
-                    "constellations": sky_events.get("visible_constellations", []),
-                    "meteor_shower": (
-                        (sky_events.get("active_meteor_shower") or {}).get("name")
-                    ),
-                    "milky_way_direction": (
-                        (sky_events.get("milky_way_direction") or {}).get(
-                            "compass_direction"
-                        )
-                    ),
-                },
-            }
-        )
-        ai_summary = ai_response["answer"]
 
-        return PlanResponse(
+        # Build the flat structured payload Gemini reasons over for the
+        # human-readable explanation + 3D visual weights. Single Gemini
+        # round trip; we derive the legacy `ai_summary` field from the
+        # explanation so existing clients keep working.
+        planet_names = [
+            p.get("name")
+            for p in (sky_events.get("visible_planets") or [])
+            if p.get("name")
+        ]
+        ai_insight = ai_explanation_service.generate_sky_insight({
+            "score": score,
+            "cloud_cover": weather.get("cloud_cover"),
+            "humidity": weather.get("humidity"),
+            "moon_illumination": astronomy.get("moon_illumination"),
+            "moon_altitude": astronomy.get("moon_altitude"),
+            "sun_altitude": astronomy.get("sun_altitude"),
+            "bortle_class": light_pollution.get("bortle_class"),
+            "milky_way_visible": astronomy.get("milky_way_visible"),
+            "planets": planet_names,
+            "time": request.time,
+        })
+        ai_summary = ai_insight.get("explanation") or ""
+        if ai_insight.get("best_action"):
+            ai_summary = f"{ai_summary} {ai_insight['best_action']}".strip()
+
+        response = PlanResponse(
             visibility_score=score,
             sky_quality=scoring_service.get_sky_quality(score),
             best_window=best_window_str,
@@ -123,8 +166,11 @@ def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
             camera_settings=camera_settings,
             recommendation=_recommendation_for(score),
             ai_summary=ai_summary,
+            ai_insight=ai_insight,
             breakdown=breakdown,
         )
+        _plan_cache.set(cache_key, response)
+        return response
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - surface as 500 with context

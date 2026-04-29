@@ -13,12 +13,18 @@ from app.services import (
     light_pollution_service,
     location_service,
     nearby_service,
+    parallel,
     scoring_service,
     weather_service,
 )
+from app.services.cache import TTLCache
 
 
 router = APIRouter(tags=["nearby"])
+
+# Nearby is the most expensive endpoint (10+ candidate points, each
+# hitting 3 upstreams). Caching keeps the second visit instant.
+_nearby_cache: TTLCache = TTLCache(ttl_seconds=180.0, max_entries=64)
 
 
 def _current_location_score(
@@ -29,18 +35,14 @@ def _current_location_score(
     """Use a default night window to estimate the score where the user is now."""
     today = datetime.utcnow().strftime("%Y-%m-%d")
     time = "23:00"
-    weather = weather_service.get_weather_data(
-        latitude, longitude, today, time
-    )
-    astronomy = astronomy_service.get_astronomy_data(
-        latitude, longitude, today, time
-    )
-    light_pollution = light_pollution_service.get_light_pollution_data(
-        latitude, longitude
-    )
-    aurora = aurora_service.get_aurora_data(latitude, longitude)
+    upstream = parallel.gather({
+        "weather": lambda: weather_service.get_weather_data(latitude, longitude, today, time),
+        "light_pollution": lambda: light_pollution_service.get_light_pollution_data(latitude, longitude),
+        "aurora": lambda: aurora_service.get_aurora_data(latitude, longitude),
+    })
+    astronomy = astronomy_service.get_astronomy_data(latitude, longitude, today, time)
     score, _ = scoring_service.calculate_score(
-        weather, astronomy, light_pollution, aurora, target
+        upstream["weather"], astronomy, upstream["light_pollution"], upstream["aurora"], target
     )
     return score
 
@@ -54,18 +56,35 @@ def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyResponse
             client_ip=client_ip,
         )
 
-        current_score = _current_location_score(latitude, longitude, request.target)
-        locations = nearby_service.get_nearby_dark_locations(
-            latitude,
-            longitude,
-            request.radius_km,
+        cache_key = (
+            round(latitude, 2),  # ~1km bucket - nearby results don't change rapidly
+            round(longitude, 2),
+            int(request.radius_km),
             request.target,
         )
+        cached = _nearby_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
-        if not locations:
-            recommendation = "No darker sites found in range; stay where you are tonight."
+        # Compute current score and candidate sweep sequentially.
+        # Both internally use parallel.gather() to fan out their own
+        # upstream calls; running both at once would risk thread pool
+        # exhaustion (16 workers total, sweep already uses ~12).
+        current_score = _current_location_score(latitude, longitude, request.target)
+        locations = nearby_service.get_nearby_dark_locations(
+            latitude, longitude, request.radius_km, request.target
+        )
+        better_locations = [loc for loc in locations if loc.get("score", 0) > current_score]
+        best_locations = sorted(
+            better_locations, key=lambda item: item.get("score", 0), reverse=True
+        )[:5]
+
+        if not best_locations:
+            recommendation = "No better locations found within selected radius."
+            message = "No better locations found within selected radius."
+            suggestion = "Try increasing radius or selecting a darker region."
         else:
-            best = locations[0]
+            best = best_locations[0]
             label = best.get("name") or f"({best['latitude']}, {best['longitude']})"
             if best["score"] > current_score + 10:
                 recommendation = (
@@ -78,13 +97,19 @@ def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyResponse
                     "Your current location is competitive with nearby dark sites; "
                     "save the drive unless you want a wider horizon."
                 )
+            message = ""
+            suggestion = ""
 
-        return NearbyResponse(
+        response = NearbyResponse(
             current_location_score=current_score,
-            best_locations=locations,
-            recommended_locations=locations,
+            best_locations=best_locations,
+            recommended_locations=best_locations,
             recommendation=recommendation,
+            message=message or None,
+            suggestion=suggestion or None,
         )
+        _nearby_cache.set(cache_key, response)
+        return response
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

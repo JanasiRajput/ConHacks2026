@@ -37,6 +37,7 @@ class PlanResponse(BaseModel):
     air_quality: Optional[Dict[str, Any]] = None
     sky_events: Optional[Dict[str, Any]] = None
     camera_settings: Dict[str, Any]
+    ai_insight: Optional[Dict[str, Any]] = None
     recommendation: str
     ai_summary: str
     breakdown: Dict[str, Any]
@@ -67,7 +68,7 @@ class FutureResponse(BaseModel):
 # /api/nearby
 # ---------------------------------------------------------------------------
 class NearbyRequest(BaseModel):
-    location_name: Optional[str] = "Unknown Location"
+    location_name: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     radius_km: int = 150
@@ -79,6 +80,8 @@ class NearbyResponse(BaseModel):
     best_locations: List[Dict[str, Any]]
     recommended_locations: Optional[List[Dict[str, Any]]] = None
     recommendation: str
+    message: Optional[str] = None
+    suggestion: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
