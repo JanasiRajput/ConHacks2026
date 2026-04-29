@@ -34,6 +34,7 @@ class PlanResponse(BaseModel):
     astronomy: Dict[str, Any]
     light_pollution: Dict[str, Any]
     aurora: Dict[str, Any]
+    air_quality: Optional[Dict[str, Any]] = None
     sky_events: Optional[Dict[str, Any]] = None
     camera_settings: Dict[str, Any]
     recommendation: str

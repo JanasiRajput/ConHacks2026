@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from app.models.schemas import PlanRequest, PlanResponse
 from app.services import (
     ai_explanation_service,
+    air_quality_service,
     astronomy_service,
     aurora_service,
     light_pollution_service,
@@ -50,6 +51,9 @@ def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
             latitude, longitude
         )
         aurora = aurora_service.get_aurora_data(latitude, longitude)
+        air_quality = air_quality_service.get_air_quality(
+            latitude, longitude, request.date, request.time
+        )
 
         score, breakdown = scoring_service.calculate_score(
             weather, astronomy, light_pollution, aurora, request.target
@@ -114,6 +118,7 @@ def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
             astronomy=astronomy,
             light_pollution=light_pollution,
             aurora=aurora,
+            air_quality=air_quality,
             sky_events=sky_events,
             camera_settings=camera_settings,
             recommendation=_recommendation_for(score),
