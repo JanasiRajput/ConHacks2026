@@ -1,53 +1,30 @@
-"""Nearby dark-sky locations service.
+"""Dynamic nearby astrophotography location search.
 
-Returns mocked but plausible nearby dark-sky locations. If the user
-sits inside the Ontario bounding box we return real Ontario sites;
-otherwise we synthesize generic offsets around the input coordinates.
+Generates sample coordinates around the user, evaluates each candidate
+with live weather + astronomy + light pollution inputs, scores them via
+the scoring engine, then returns the top locations.
 """
 
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import Any, Dict, List
 
+from app.services import (
+    astronomy_service,
+    aurora_service,
+    light_pollution_service,
+    scoring_service,
+    weather_service,
+)
 
-# Real, well-known Ontario dark-sky locations.
-_ONTARIO_LOCATIONS = [
-    {
-        "name": "Algonquin Provincial Park",
-        "latitude": 45.8372,
-        "longitude": -78.3791,
-        "estimated_bortle_class": 2,
-        "reason": "Vast wilderness with very limited artificial lighting.",
-    },
-    {
-        "name": "Torrance Barrens Dark-Sky Preserve",
-        "latitude": 44.9667,
-        "longitude": -79.5167,
-        "estimated_bortle_class": 2,
-        "reason": "Officially designated dark-sky preserve, open horizons.",
-    },
-    {
-        "name": "Bruce Peninsula / Tobermory",
-        "latitude": 45.2536,
-        "longitude": -81.6628,
-        "estimated_bortle_class": 3,
-        "reason": "Surrounded by Lake Huron and Georgian Bay; minimal light dome.",
-    },
-    {
-        "name": "Point Pelee National Park",
-        "latitude": 41.9612,
-        "longitude": -82.5160,
-        "estimated_bortle_class": 4,
-        "reason": "Southern Ontario coastal park with darker skies looking south.",
-    },
-    {
-        "name": "Manitoulin Island",
-        "latitude": 45.7515,
-        "longitude": -82.1581,
-        "estimated_bortle_class": 2,
-        "reason": "World's largest freshwater island; rural and very dark.",
-    },
+# 16 deterministic offsets in the requested 0.2 .. 1.0 degree range.
+_OFFSETS = [
+    (0.20, 0.00), (-0.20, 0.00), (0.00, 0.20), (0.00, -0.20),
+    (0.35, 0.35), (-0.35, 0.35), (0.35, -0.35), (-0.35, -0.35),
+    (0.50, 0.80), (-0.50, 0.80), (0.50, -0.80), (-0.50, -0.80),
+    (0.75, 0.40), (-0.75, 0.40), (1.00, 0.20), (-1.00, -0.20),
 ]
 
 
@@ -65,35 +42,65 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return round(r * c, 1)
 
 
-def _is_in_ontario(latitude: float, longitude: float) -> bool:
-    return 41.5 <= latitude <= 56.9 and -95.0 <= longitude <= -74.0
+def _sample_points(latitude: float, longitude: float, radius_km: int) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    for d_lat, d_lon in _OFFSETS:
+        lat = round(latitude + d_lat, 5)
+        lon = round(longitude + d_lon, 5)
+        distance_km = _haversine_km(latitude, longitude, lat, lon)
+        if distance_km <= radius_km:
+            points.append({
+                "latitude": lat,
+                "longitude": lon,
+                "distance_km": distance_km,
+            })
+
+    # If radius is very small and nothing survives, keep nearest points
+    # so the endpoint still returns useful alternatives.
+    if not points:
+        fallback = []
+        for d_lat, d_lon in _OFFSETS:
+            lat = round(latitude + d_lat, 5)
+            lon = round(longitude + d_lon, 5)
+            fallback.append({
+                "latitude": lat,
+                "longitude": lon,
+                "distance_km": _haversine_km(latitude, longitude, lat, lon),
+            })
+        fallback.sort(key=lambda p: p["distance_km"])
+        points = fallback[:10]
+
+    return points
 
 
-def _score_for_bortle(bortle: int, distance_km: float, radius_km: float) -> int:
-    """Closer + darker is better. Scale 0-100."""
-    pollution_score = 100 - (bortle - 1) * 11.25
-    distance_penalty = min(40.0, (distance_km / max(radius_km, 1)) * 30.0)
-    return int(max(20, min(100, round(pollution_score - distance_penalty))))
+def _evaluate_point(
+    latitude: float,
+    longitude: float,
+    date: str,
+    time: str,
+    target: str,
+    distance_km: float,
+) -> Dict[str, Any]:
+    weather = weather_service.get_weather_data(latitude, longitude, date, time)
+    astronomy = astronomy_service.get_astronomy_data(latitude, longitude, date, time)
+    light_pollution = light_pollution_service.get_light_pollution_data(latitude, longitude)
+    aurora = aurora_service.get_aurora_data(latitude, longitude)
+    score, _ = scoring_service.calculate_score(
+        weather, astronomy, light_pollution, aurora, target
+    )
 
-
-def _generic_locations(latitude: float, longitude: float) -> List[Dict[str, Any]]:
-    offsets = [
-        ("North Ridge Lookout", 0.9, 0.0, 3),
-        ("Lakeside Reserve", -0.7, 0.6, 3),
-        ("Highland Plateau", 0.6, -0.8, 2),
-        ("Quiet Valley Park", -0.5, -0.5, 4),
-        ("Coastal Dunes", 0.3, 1.1, 3),
-    ]
-    locations: List[Dict[str, Any]] = []
-    for name, d_lat, d_lon, bortle in offsets:
-        locations.append({
-            "name": name,
-            "latitude": round(latitude + d_lat, 4),
-            "longitude": round(longitude + d_lon, 4),
-            "estimated_bortle_class": bortle,
-            "reason": "Sparse population and elevated terrain reduce skyglow.",
-        })
-    return locations
+    return {
+        "latitude": latitude,
+        "longitude": longitude,
+        "distance_km": distance_km,
+        "score": score,
+        "bortle_class": int(light_pollution.get("bortle_class", 5)),
+        "reason": "Lower light pollution and better sky clarity",
+        "weather_snapshot": {
+            "cloud_cover": weather.get("cloud_cover"),
+            "condition": weather.get("condition"),
+        },
+    }
 
 
 def get_nearby_dark_locations(
@@ -102,29 +109,22 @@ def get_nearby_dark_locations(
     radius_km: int,
     target: str,
 ) -> List[Dict[str, Any]]:
-    if _is_in_ontario(latitude, longitude):
-        candidates = _ONTARIO_LOCATIONS
-    else:
-        candidates = _generic_locations(latitude, longitude)
+    date = datetime.utcnow().strftime("%Y-%m-%d")
+    time = "23:00"
+    points = _sample_points(latitude, longitude, radius_km)
 
-    enriched: List[Dict[str, Any]] = []
-    for loc in candidates:
-        distance_km = _haversine_km(
-            latitude, longitude, loc["latitude"], loc["longitude"]
+    evaluated: List[Dict[str, Any]] = []
+    for point in points:
+        evaluated.append(
+            _evaluate_point(
+                point["latitude"],
+                point["longitude"],
+                date,
+                time,
+                target,
+                point["distance_km"],
+            )
         )
-        score = _score_for_bortle(
-            loc["estimated_bortle_class"], distance_km, radius_km
-        )
-        enriched.append({
-            "name": loc["name"],
-            "latitude": loc["latitude"],
-            "longitude": loc["longitude"],
-            "distance_km": distance_km,
-            "estimated_bortle_class": loc["estimated_bortle_class"],
-            "score": score,
-            "reason": loc["reason"],
-            "target": target,
-        })
 
-    enriched.sort(key=lambda item: item["score"], reverse=True)
-    return enriched[:5]
+    evaluated.sort(key=lambda item: item["score"], reverse=True)
+    return evaluated[:5]

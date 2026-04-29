@@ -14,8 +14,8 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 class PlanRequest(BaseModel):
     location_name: Optional[str] = "Unknown Location"
-    latitude: float
-    longitude: float
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     date: str
     time: str
     target: str = "milky_way"
@@ -45,8 +45,8 @@ class PlanResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class FutureRequest(BaseModel):
     location_name: Optional[str] = "Unknown Location"
-    latitude: float
-    longitude: float
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     target: str = "milky_way"
     days: int = 7
 
@@ -65,15 +65,17 @@ class FutureResponse(BaseModel):
 # /api/nearby
 # ---------------------------------------------------------------------------
 class NearbyRequest(BaseModel):
-    latitude: float
-    longitude: float
+    location_name: Optional[str] = "Unknown Location"
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     radius_km: int = 150
     target: str = "milky_way"
 
 
 class NearbyResponse(BaseModel):
     current_location_score: int
-    recommended_locations: List[Dict[str, Any]]
+    best_locations: List[Dict[str, Any]]
+    recommended_locations: Optional[List[Dict[str, Any]]] = None
     recommendation: str
 
 
@@ -136,8 +138,9 @@ class EventsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class AISearchRequest(BaseModel):
     query: str
-    latitude: float
-    longitude: float
+    location_name: Optional[str] = "Unknown Location"
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 class AISearchResponse(BaseModel):

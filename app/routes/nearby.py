@@ -11,6 +11,7 @@ from app.services import (
     astronomy_service,
     aurora_service,
     light_pollution_service,
+    location_service,
     nearby_service,
     scoring_service,
     weather_service,
@@ -20,22 +21,26 @@ from app.services import (
 router = APIRouter(tags=["nearby"])
 
 
-def _current_location_score(request: NearbyRequest) -> int:
+def _current_location_score(
+    latitude: float,
+    longitude: float,
+    target: str,
+) -> int:
     """Use a default night window to estimate the score where the user is now."""
     today = datetime.utcnow().strftime("%Y-%m-%d")
     time = "23:00"
     weather = weather_service.get_weather_data(
-        request.latitude, request.longitude, today, time
+        latitude, longitude, today, time
     )
     astronomy = astronomy_service.get_astronomy_data(
-        request.latitude, request.longitude, today, time
+        latitude, longitude, today, time
     )
     light_pollution = light_pollution_service.get_light_pollution_data(
-        request.latitude, request.longitude
+        latitude, longitude
     )
-    aurora = aurora_service.get_aurora_data(request.latitude, request.longitude)
+    aurora = aurora_service.get_aurora_data(latitude, longitude)
     score, _ = scoring_service.calculate_score(
-        weather, astronomy, light_pollution, aurora, request.target
+        weather, astronomy, light_pollution, aurora, target
     )
     return score
 
@@ -43,10 +48,14 @@ def _current_location_score(request: NearbyRequest) -> int:
 @router.post("/nearby", response_model=NearbyResponse)
 def find_nearby(request: NearbyRequest) -> NearbyResponse:
     try:
-        current_score = _current_location_score(request)
+        latitude, longitude, _ = location_service.resolve_location(
+            request.latitude, request.longitude, request.location_name
+        )
+
+        current_score = _current_location_score(latitude, longitude, request.target)
         locations = nearby_service.get_nearby_dark_locations(
-            request.latitude,
-            request.longitude,
+            latitude,
+            longitude,
             request.radius_km,
             request.target,
         )
@@ -57,7 +66,8 @@ def find_nearby(request: NearbyRequest) -> NearbyResponse:
             best = locations[0]
             if best["score"] > current_score + 10:
                 recommendation = (
-                    f"Drive to {best['name']} ({best['distance_km']} km away) - "
+                    f"Try ({best['latitude']}, {best['longitude']}) "
+                    f"({best['distance_km']} km away) - "
                     f"its estimated score of {best['score']}/100 is meaningfully "
                     "better than your current spot."
                 )
@@ -69,6 +79,7 @@ def find_nearby(request: NearbyRequest) -> NearbyResponse:
 
         return NearbyResponse(
             current_location_score=current_score,
+            best_locations=locations,
             recommended_locations=locations,
             recommendation=recommendation,
         )
