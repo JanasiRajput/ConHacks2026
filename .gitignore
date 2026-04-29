@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.env
+.DS_Store
+node_modules/
+*.log
+
+# Auto-downloaded Skyfield ephemeris cache (~16MB).
+# Skyfield will redownload de421.bsp on first call.
+skyfield-data/
