@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -28,6 +28,7 @@ from app.services import (
     ai_explanation_service,
     astronomy_service,
     gemini_service,
+    geocoding_service,
     location_service,
     sky_events_service,
 )
@@ -54,6 +55,42 @@ _DEFAULT_TIME_FOR_TARGET = {
     "moon": "22:00",
     "stars": "23:00",
 }
+
+# Words a place name should never start, end, or contain. Anything in
+# this set marks the boundary of a candidate phrase.
+_LOCATION_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "but", "of", "for", "to", "from", "with",
+    "without", "as", "if", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "must", "shall", "i", "you", "we", "they",
+    "he", "she", "it", "this", "that", "these", "those",
+    # The trigger words themselves act as boundaries when they appear
+    # inside a captured candidate ("near brampton in near future" -> "brampton").
+    "near", "in", "at", "around", "outside", "by", "close", "on",
+    # Time-y words that often follow "in" / "near" but aren't places.
+    "tonight", "today", "tomorrow", "yesterday", "evening", "morning",
+    "night", "midnight", "noon", "afternoon", "dawn", "dusk",
+    "future", "past", "next", "upcoming", "weekend", "week", "month",
+    "year", "day", "hour", "minute", "season",
+    # Sky-y words people drop into the query.
+    "sky", "skies", "stars", "star", "constellation", "constellations",
+    "milky", "way", "milkyway", "galaxy", "galactic", "moon", "lunar",
+    "planet", "planets", "jupiter", "saturn", "mars", "venus", "mercury",
+    "aurora", "auroras", "borealis",
+    # Misc fillers and intent verbs.
+    "please", "can", "see", "view", "shoot", "photograph", "watch", "find",
+    "show", "tell", "give", "any", "some", "all", "best", "good", "great",
+    "amazing", "now", "soon", "later",
+})
+
+# Capture 1-3 alphabetic words after a place trigger. We deliberately
+# refuse the greedy `[a-z\s]+` shape because it would happily swallow the
+# tail of the question ("sky near brampton in near future").
+_LOCATION_TRIGGER_RE = re.compile(
+    r"\b(?:near|in|at|around|outside|by|close\s+to)\s+"
+    r"([a-zA-Z][a-zA-Z'\-]*(?:\s+[a-zA-Z][a-zA-Z'\-]*){0,2})",
+    re.IGNORECASE,
+)
 
 _DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 # Match an explicit clock time only: either HH:MM (optionally with am/pm)
@@ -134,11 +171,40 @@ def _smart_time(query: str, target: str) -> str:
     return _DEFAULT_TIME_FOR_TARGET.get(target, "23:00")
 
 
+def _extract_place_phrase(query: str) -> Optional[str]:
+    """Pull a candidate place name out of a free-form question.
+
+    Looks for "near <X>", "in <X>", "at <X>", etc., and then peels
+    off any leading/trailing stopwords and cuts the phrase at the
+    first internal stopword. Returns ``None`` if no plausible phrase
+    survives the filtering.
+    """
+    for match in _LOCATION_TRIGGER_RE.finditer(query):
+        raw = match.group(1)
+        words = [w for w in re.split(r"\s+", raw.strip()) if w]
+        # Strip leading stopwords (e.g. "in the city" -> "city").
+        while words and words[0].lower() in _LOCATION_STOPWORDS:
+            words.pop(0)
+        # Cut on the first internal stopword: "brampton in near future"
+        # -> just "brampton".
+        for i, word in enumerate(words):
+            if word.lower() in _LOCATION_STOPWORDS:
+                words = words[:i]
+                break
+        if not words:
+            continue
+        candidate = " ".join(words).strip(" .,?!\"'")
+        if len(candidate) >= 3 and any(c.isalpha() for c in candidate):
+            return candidate
+    return None
+
+
 def _parse_query(query: str) -> Dict[str, Any]:
     target = _detect_target(query)
     intent = _detect_intent(query)
     date_token, future_days = _detect_date_token(query)
     time_str = _smart_time(query, target)
+    place_phrase = _extract_place_phrase(query)
 
     return {
         "target": target,
@@ -146,6 +212,7 @@ def _parse_query(query: str) -> Dict[str, Any]:
         "date_token": date_token,
         "future_days": future_days,
         "time": time_str,
+        "place_phrase": place_phrase,
     }
 
 
@@ -200,12 +267,16 @@ def _route_to_backend(
             "sky_events": events,
         }
 
-    # "Future" questions go to the multi-day planner.
+    # "Future" questions go to the multi-day planner. We cap the horizon
+    # at 5 days for AI-search specifically because each day adds an
+    # outbound weather + astronomy round-trip and the user's question is
+    # almost always "soon", not "next month".
     if date_token == "future" or intent == "best_time":
-        days = parsed["future_days"] or 7
+        days = parsed["future_days"] or 5
+        days = max(1, min(days, 5))
         future = predict_future(
             FutureRequest(
-                location_name="Your Location",
+                location_name=location_name or "Your Location",
                 latitude=latitude,
                 longitude=longitude,
                 target=parsed["target"],
@@ -299,6 +370,19 @@ def ai_search(request: AISearchRequest, http_request: Request) -> AISearchRespon
             client_ip=client_ip,
         )
         parsed = _parse_query(request.query)
+
+        # If the user asked about a specific place inside their question
+        # ("near brampton", "in toronto"...), forward-geocode it and let
+        # that override the GPS-resolved coordinates so the answer is
+        # actually about the place they asked about.
+        place_phrase = parsed.get("place_phrase")
+        if place_phrase:
+            geocoded = geocoding_service.geocode(place_phrase)
+            if geocoded is not None:
+                latitude, longitude, _display = geocoded
+                location_name = place_phrase.title()
+                parsed["resolved_place"] = location_name
+
         route, data = _route_to_backend(
             parsed, latitude, longitude, location_name, http_request
         )
