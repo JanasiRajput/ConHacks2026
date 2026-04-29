@@ -112,6 +112,26 @@ class AuroraResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# /api/events - target-agnostic "what's up tonight"
+# ---------------------------------------------------------------------------
+class EventsRequest(BaseModel):
+    latitude: float
+    longitude: float
+    date: str
+    time: str
+
+
+class EventsResponse(BaseModel):
+    date: str
+    time: str
+    location: Dict[str, float]
+    astronomy: Dict[str, Any]
+    sky_events: Dict[str, Any]
+    aurora: Dict[str, Any]
+    summary: str
+
+
+# ---------------------------------------------------------------------------
 # /api/ai-search
 # ---------------------------------------------------------------------------
 class AISearchRequest(BaseModel):
