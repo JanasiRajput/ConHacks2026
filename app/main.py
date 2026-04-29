@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 try:
     from dotenv import load_dotenv
 
@@ -9,10 +11,15 @@ try:
 except Exception:  # pragma: no cover - dotenv is optional
     pass
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.routes import ai_search, astronomy, aurora, events, future, nearby, planner, sky
+
+
+logger = logging.getLogger("skylens.validation")
 
 
 app = FastAPI(
@@ -41,6 +48,33 @@ app.include_router(astronomy.router, prefix="/api")
 app.include_router(aurora.router, prefix="/api")
 app.include_router(events.router, prefix="/api")
 app.include_router(ai_search.router, prefix="/api")
+
+
+@app.exception_handler(RequestValidationError)
+async def _log_validation_errors(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Log every 422 with the offending payload + field-level errors.
+
+    Helps debug schema drift between the frontend and the FastAPI models
+    without having to crack open browser devtools every time.
+    """
+    try:
+        body = await request.body()
+        body_text = body.decode("utf-8", errors="replace")[:1000]
+    except Exception:  # noqa: BLE001
+        body_text = "<unavailable>"
+    logger.warning(
+        "422 on %s %s\n  errors: %s\n  body: %s",
+        request.method,
+        request.url.path,
+        exc.errors(),
+        body_text,
+    )
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body_received": body_text},
+    )
 
 
 @app.get("/")
