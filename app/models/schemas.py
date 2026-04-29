@@ -6,7 +6,7 @@ Response keys here are stable - downstream clients depend on them.
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 # ---------------------------------------------------------------------------
