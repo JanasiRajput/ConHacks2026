@@ -53,17 +53,60 @@ _breaker_open_until = 0.0
 _cache: Dict[Tuple[float, float], Tuple[float, Dict[str, Any]]] = {}
 
 
-# Deterministic fallback table - kept small. Used only when Overpass is
-# unavailable so the API still returns something sensible.
+# Globally-distributed deterministic fallback table. Used only when the
+# Overpass API is unreachable. The list intentionally mixes major
+# metropolitan areas (Bortle 8-9) with major dark-sky preserves
+# (Bortle 1-2) on every continent so a coordinate anywhere in the world
+# still gets a sensible nearest-reference + remoteness adjustment.
 _FALLBACK_REFERENCE_POINTS: List[Tuple[str, float, float, int]] = [
-    ("Toronto", 43.6532, -79.3832, 8),
-    ("Kitchener-Waterloo", 43.4643, -80.5204, 6),
-    ("Hamilton", 43.2557, -79.8711, 7),
-    ("Niagara Falls", 43.0896, -79.0849, 7),
-    ("Algonquin Park", 45.8372, -78.3791, 2),
-    ("Torrance Barrens Dark-Sky Preserve", 44.9667, -79.5167, 2),
-    ("Tobermory / Bruce Peninsula", 45.2536, -81.6628, 3),
-    ("Manitoulin Island", 45.7515, -82.1581, 2),
+    # North America - megacities
+    ("New York City, USA", 40.7128, -74.0060, 9),
+    ("Los Angeles, USA", 34.0522, -118.2437, 9),
+    ("Chicago, USA", 41.8781, -87.6298, 8),
+    ("Toronto, Canada", 43.6532, -79.3832, 8),
+    ("Mexico City, Mexico", 19.4326, -99.1332, 9),
+    # North America - dark sites
+    ("Algonquin Park, Canada", 45.8372, -78.3791, 2),
+    ("Cherry Springs State Park, USA", 41.6628, -77.8264, 2),
+    ("Big Bend, USA", 29.2498, -103.2502, 1),
+    # South America
+    ("Sao Paulo, Brazil", -23.5505, -46.6333, 9),
+    ("Buenos Aires, Argentina", -34.6037, -58.3816, 8),
+    ("Atacama Desert, Chile", -23.6500, -68.5500, 1),
+    # Europe - megacities
+    ("London, United Kingdom", 51.5074, -0.1278, 9),
+    ("Paris, France", 48.8566, 2.3522, 9),
+    ("Berlin, Germany", 52.5200, 13.4050, 8),
+    ("Madrid, Spain", 40.4168, -3.7038, 8),
+    ("Rome, Italy", 41.9028, 12.4964, 8),
+    ("Moscow, Russia", 55.7558, 37.6173, 9),
+    # Europe - dark sites
+    ("Galloway Forest Park, UK", 55.1000, -4.4000, 2),
+    ("Pic du Midi, France", 42.9367, 0.1411, 2),
+    # Asia - megacities
+    ("Tokyo, Japan", 35.6762, 139.6503, 9),
+    ("Beijing, China", 39.9042, 116.4074, 9),
+    ("Shanghai, China", 31.2304, 121.4737, 9),
+    ("Mumbai, India", 19.0760, 72.8777, 9),
+    ("Delhi, India", 28.7041, 77.1025, 9),
+    ("Seoul, South Korea", 37.5665, 126.9780, 9),
+    ("Singapore", 1.3521, 103.8198, 9),
+    ("Dubai, UAE", 25.2048, 55.2708, 8),
+    # Africa
+    ("Lagos, Nigeria", 6.5244, 3.3792, 8),
+    ("Cairo, Egypt", 30.0444, 31.2357, 8),
+    ("Johannesburg, South Africa", -26.2041, 28.0473, 7),
+    ("Sahara Desert (central)", 23.0000, 13.0000, 1),
+    ("NamibRand Reserve, Namibia", -25.5000, 16.0000, 1),
+    # Oceania
+    ("Sydney, Australia", -33.8688, 151.2093, 8),
+    ("Melbourne, Australia", -37.8136, 144.9631, 8),
+    ("Auckland, New Zealand", -36.8485, 174.7633, 7),
+    ("Aoraki Mackenzie Dark-Sky Reserve, NZ", -43.7370, 170.0959, 1),
+    # Polar
+    ("McMurdo Station, Antarctica", -77.8419, 166.6863, 1),
+    ("Reykjavik, Iceland", 64.1466, -21.9426, 5),
+    ("Tromso, Norway", 69.6492, 18.9553, 5),
 ]
 
 

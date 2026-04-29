@@ -1,11 +1,18 @@
 """Shared location-resolution helpers.
 
+The whole API is location-agnostic: every service downstream takes a
+latitude/longitude and computes against it via Skyfield, Open-Meteo,
+NOAA, OSM, etc. This module is the single place that decides *which*
+coordinate to feed those services when the caller hasn't supplied one.
+
 Resolution order when latitude/longitude are missing:
 
   1. Explicit coordinates from the caller (frontend GPS, etc.)
-  2. Reverse-geocode the explicit `location_name` via Nominatim
+  2. Forward-geocode the explicit `location_name` via Nominatim
   3. IP-geolocation of the requesting client (ipapi.co)
-  4. Hard-coded fallback (Kitchener, Canada)
+  4. Last-ditch default (configurable via `DEFAULT_LATITUDE` /
+     `DEFAULT_LONGITUDE` / `DEFAULT_LOCATION_NAME` env vars; Kitchener
+     is used only because this is the ConHacks demo deployment).
 
 Reverse-geocoding the resolved coordinates always runs at the end so
 the response includes a human-readable place name even when only
@@ -30,9 +37,18 @@ from app.services import geocoding_service
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_LOCATION_NAME = "Kitchener, Canada"
-DEFAULT_LATITUDE = 43.4516
-DEFAULT_LONGITUDE = -80.4925
+# All defaults are overridable per-deployment via environment variables
+# so the API is genuinely "for any location" - the Kitchener values are
+# just a sane last-resort if every other lookup fails.
+DEFAULT_LOCATION_NAME = os.environ.get("DEFAULT_LOCATION_NAME", "Kitchener, Canada")
+try:
+    DEFAULT_LATITUDE = float(os.environ.get("DEFAULT_LATITUDE", "43.4516"))
+except ValueError:
+    DEFAULT_LATITUDE = 43.4516
+try:
+    DEFAULT_LONGITUDE = float(os.environ.get("DEFAULT_LONGITUDE", "-80.4925"))
+except ValueError:
+    DEFAULT_LONGITUDE = -80.4925
 
 _IP_LOOKUP_URL = os.environ.get("IP_LOCATION_URL", "https://ipapi.co/json/")
 _IP_LOOKUP_TIMEOUT = float(os.environ.get("IP_LOCATION_TIMEOUT", "3.0"))
