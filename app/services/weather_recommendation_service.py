@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Tuple, Union
 
 import requests
 
@@ -43,14 +43,24 @@ out center tags qt;
 """.strip()
 
 
-def _element_coordinates(element: Dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
+def _element_coordinates(
+    element: Dict[str, Any],
+) -> Union[Tuple[float, float], Tuple[None, None]]:
+    """Return (lat, lon) as floats, or (None, None) if missing.
+
+    The return type is a discriminated union of two fully-paired tuples
+    so callers cannot accidentally observe a half-filled coordinate
+    (e.g. ``(None, float)``) at the type level.
+    """
     lat = element.get("lat")
     lon = element.get("lon")
     if lat is not None and lon is not None:
         return float(lat), float(lon)
     center = element.get("center") or {}
-    if center.get("lat") is not None and center.get("lon") is not None:
-        return float(center["lat"]), float(center["lon"])
+    c_lat = center.get("lat")
+    c_lon = center.get("lon")
+    if c_lat is not None and c_lon is not None:
+        return float(c_lat), float(c_lon)
     return None, None
 
 
