@@ -311,6 +311,7 @@ def get_camera_settings(
     score: int,
     light_pollution: Dict[str, Any] | None = None,
     astronomy: Dict[str, Any] | None = None,
+    weather: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Camera settings derived from real conditions.
 
@@ -325,25 +326,36 @@ def get_camera_settings(
     """
     light_pollution = light_pollution or {}
     astronomy = astronomy or {}
+    weather = weather or {}
 
     bortle = int(light_pollution.get("bortle_class", 5) or 5)
     bortle = max(1, min(9, bortle))
     moon_illumination = float(astronomy.get("moon_illumination", 0) or 0)
     moon_altitude = float(astronomy.get("moon_altitude", 0) or 0)
+    sun_altitude = float(astronomy.get("sun_altitude", 0) or 0)
+    cloud_cover = float(weather.get("cloud_cover", 0) or 0)
     moon_brightness = moon_illumination if moon_altitude > 0 else 0.0
 
     target_norm = (target or "").replace("_", "").lower()
     if target_norm in ("milkyway", "milky"):
-        return _milkyway_settings(bortle, moon_brightness, score)
-    if target_norm == "moon":
-        return _moon_settings(moon_illumination, score)
-    if target_norm == "aurora":
-        return _aurora_settings(bortle, moon_brightness, score)
-    if target_norm == "planets":
-        return _planet_settings(score)
-    if target_norm == "stars":
-        return _stars_settings(bortle, moon_brightness, score)
-    return _stars_settings(bortle, moon_brightness, score)
+        settings = _milkyway_settings(bortle, moon_brightness, score)
+    elif target_norm == "moon":
+        settings = _moon_settings(moon_illumination, score)
+    elif target_norm == "aurora":
+        settings = _aurora_settings(bortle, moon_brightness, score)
+    elif target_norm == "planets":
+        settings = _planet_settings(score)
+    else:
+        settings = _stars_settings(bortle, moon_brightness, score)
+
+    # Global adaptation rules requested for practical field use.
+    if cloud_cover >= 65:
+        settings["warning"] = "Clouds are heavy right now; conditions may not be worth the trip."
+    if moon_brightness >= 60:
+        settings["iso"] = max(400, int(float(settings.get("iso", 1600)) * 0.75))
+    if sun_altitude <= -18 and moon_brightness <= 20 and cloud_cover < 35:
+        settings["iso"] = min(6400, int(float(settings.get("iso", 1600)) * 1.2))
+    return settings
 
 
 def _500_rule_seconds(focal_length_mm: float, latitude_deg: float | None = None) -> float:

@@ -2,23 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from fastapi import APIRouter, HTTPException, Request
 
 from app.models.schemas import NearbyRequest, NearbyResponse
 from app.services import (
-    astronomy_service,
-    aurora_service,
-    light_pollution_service,
     location_service,
     nearby_service,
-    parallel,
-    scoring_service,
-    weather_service,
 )
 from app.services.cache import TTLCache
-from app.services.data_sources import build_data_sources
 
 
 router = APIRouter(tags=["nearby"])
@@ -26,26 +17,9 @@ router = APIRouter(tags=["nearby"])
 # Nearby is the most expensive endpoint (10+ candidate points, each
 # hitting 3 upstreams). Caching keeps the second visit instant.
 _nearby_cache: TTLCache = TTLCache(ttl_seconds=180.0, max_entries=64)
-
-
-def _current_location_score(
-    latitude: float,
-    longitude: float,
-    target: str,
-) -> int:
-    """Use a default night window to estimate score at current location."""
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    time = "23:00"
-    upstream = parallel.gather({
-        "weather": lambda: weather_service.get_weather_data(latitude, longitude, today, time),
-        "light_pollution": lambda: light_pollution_service.get_light_pollution_data(latitude, longitude),
-        "aurora": lambda: aurora_service.get_aurora_data(latitude, longitude),
-    })
-    astronomy = astronomy_service.get_astronomy_data(latitude, longitude, today, time)
-    score, _ = scoring_service.calculate_score(
-        upstream["weather"], astronomy, upstream["light_pollution"], upstream["aurora"], target
-    )
-    return score
+_RADIUS_STEPS = (50, 100, 200, 300)
+_GOOD_SCORE_THRESHOLD = 70
+_NEAR_REAL_PLACE_KM = 5.0
 
 
 @router.post(
@@ -53,11 +27,11 @@ def _current_location_score(
     response_model=NearbyResponse,
     summary="Nearby Real Place Finder",
     description=(
-        "Find real named nearby places from OpenStreetMap/Overpass and rank possible viewing pins. "
-        "Best for: 'Where nearby should I go?'"
+        "Best real place (Google Places / OSM) plus mathematically optimal coordinates from a grid "
+        "search within your radius. Best for: 'Where should I go?' and 'What's the best sky in this area?'"
     ),
 )
-def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyResponse:
+async def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyResponse:
     try:
         client_ip = http_request.client.host if http_request.client else None
         latitude, longitude, _ = location_service.resolve_location(
@@ -85,131 +59,105 @@ def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyResponse
         if cached is not None:
             return cached
 
-        # Compute current score and candidate sweep sequentially.
-        # Both internally use parallel.gather() to fan out their own
-        # upstream calls; running both at once would risk thread pool
-        # exhaustion (16 workers total, sweep already uses ~12).
-        current_score = _current_location_score(latitude, longitude, request.target)
-        locations = nearby_service.get_nearby_dark_locations(
-            latitude, longitude, request.radius_km, request.target
+        requested_radius = max(1, min(int(request.radius_km), 300))
+        expanded_radii = [r for r in _RADIUS_STEPS if r >= min(50, requested_radius)]
+        if requested_radius not in expanded_radii:
+            expanded_radii.insert(0, requested_radius)
+
+        best_scored: list[dict] = []
+        radius_used = requested_radius
+        for radius in expanded_radii:
+            best_scored = await nearby_service.get_nearby_dark_locations_async(
+                latitude, longitude, radius, request.target, max_places=10
+            )
+            radius_used = radius
+            if not best_scored:
+                continue
+            if int(best_scored[0].get("score", 0)) >= _GOOD_SCORE_THRESHOLD:
+                break
+            if radius >= 300:
+                break
+
+        optimal_raw = await nearby_service.find_optimal_coordinates_async(
+            latitude,
+            longitude,
+            float(radius_used),
+            request.target,
+            max_grid_points=18,
         )
-        if not locations:
-            response = NearbyResponse(
-                current_location_score=current_score,
-                best_locations=[],
-                recommended_locations=[],
-                candidate_locations=[],
-                pin_location=None,
-                best_spot=None,
-                alternatives=[],
-                note="No verified nearby locations found. Try increasing radius.",
-                recommendation="No real nearby place data available right now.",
-                message="OpenStreetMap did not return nearby named places for this request.",
-                suggestion="Try a larger radius or retry in a minute.",
-                data_sources=build_data_sources(
-                    weather_status="live_or_fallback",
-                    aurora_status="live_or_fallback",
-                    nearby_status="empty",
-                    nearby_source="Google Places API / OpenStreetMap Overpass",
-                    ai_status=None,
+        optimal_coordinates = None
+        if optimal_raw:
+            optimal_coordinates = {
+                "latitude": optimal_raw["latitude"],
+                "longitude": optimal_raw["longitude"],
+                "score": optimal_raw["score"],
+                "reason": optimal_raw.get(
+                    "reason",
+                    "Best sky visibility based on all factors",
                 ),
+            }
+
+        note: str | None = None
+        if optimal_coordinates:
+            olat = float(optimal_coordinates["latitude"])
+            olon = float(optimal_coordinates["longitude"])
+            nearest_km = nearby_service.min_distance_to_places_km(olat, olon, best_scored)
+            if nearest_km is None or nearest_km > _NEAR_REAL_PLACE_KM:
+                note = nearby_service.OPTIMAL_COORD_SAFETY_NOTE
+
+        if not best_scored:
+            response = NearbyResponse(
+                best_spot=None,
+                optimal_coordinates=optimal_coordinates,
+                alternatives=[],
+                message=(
+                    "No real nearby places were found. Try again with a larger radius."
+                    if optimal_coordinates is None
+                    else None
+                ),
+                note=note,
             )
             _nearby_cache.set(cache_key, response)
             return response
 
-        better_locations = [loc for loc in locations if loc.get("score", 0) > current_score]
-        candidate_locations = sorted(
-            locations, key=lambda item: item.get("score", 0), reverse=True
-        )[:5]
-        best_locations = sorted(
-            better_locations, key=lambda item: item.get("score", 0), reverse=True
-        )[:5]
-        pin_location = (best_locations or candidate_locations or [None])[0]
-
-        if not best_locations:
-            recommendation = "No better locations found within selected radius."
-            message = "No better locations found within selected radius."
-            suggestion = "Try increasing radius or selecting a darker region."
-        else:
-            best = best_locations[0]
-            label = best.get("name") or f"({best['latitude']}, {best['longitude']})"
-            if best["score"] > current_score + 10:
-                recommendation = (
-                    f"Try {label} ({best['distance_km']} km away) - "
-                    f"its estimated score of {best['score']}/100 is meaningfully "
-                    "better than your current spot."
-                )
-            else:
-                recommendation = (
-                    "Your current location is competitive with nearby dark sites; "
-                    "save the drive unless you want a wider horizon."
-                )
-            message = ""
-            suggestion = ""
-
-        selected = pin_location or None
-        best_spot = None
-        if selected is not None:
-            best_spot = {
-                "name": selected.get("name"),
-                "latitude": selected.get("latitude"),
-                "longitude": selected.get("longitude"),
-                "address": selected.get("address"),
-                "maps_url": selected.get("maps_url")
-                or f"https://www.google.com/maps/search/?api=1&query={selected.get('latitude')},{selected.get('longitude')}",
-                "distance_km": selected.get("distance_km"),
-                "score": selected.get("score"),
-                "reason": selected.get("reason"),
-                "navigation": selected.get("navigation") or {"route_available": False},
-                "source": selected.get("source") or "OpenStreetMap Overpass",
-            }
+        best = best_scored[0]
+        best_spot = {
+            "name": best.get("name"),
+            "latitude": best.get("latitude"),
+            "longitude": best.get("longitude"),
+            "address": best.get("address"),
+            "maps_url": best.get("maps_url")
+            or f"https://www.google.com/maps/search/?api=1&query={best.get('latitude')},{best.get('longitude')}",
+            "distance_km": best.get("distance_km"),
+            "score": int(best.get("score", 0)),
+            "reason": best.get("reason"),
+            "navigation": best.get("navigation") or {"route_available": False},
+            "source": best.get("source"),
+        }
         alternatives = []
-        for alt in (candidate_locations or [])[:3]:
-            alternatives.append({
-                "name": alt.get("name"),
-                "latitude": alt.get("latitude"),
-                "longitude": alt.get("longitude"),
-                "address": alt.get("address"),
-                "maps_url": alt.get("maps_url")
-                or f"https://www.google.com/maps/search/?api=1&query={alt.get('latitude')},{alt.get('longitude')}",
-                "distance_km": alt.get("distance_km"),
-                "score": alt.get("score"),
-                "reason": alt.get("reason"),
-                "navigation": alt.get("navigation") or {"route_available": False},
-                "source": alt.get("source") or "OpenStreetMap Overpass",
-            })
+        for alt in best_scored[1:4]:
+            alternatives.append(
+                {
+                    "name": alt.get("name"),
+                    "latitude": alt.get("latitude"),
+                    "longitude": alt.get("longitude"),
+                    "address": alt.get("address"),
+                    "maps_url": alt.get("maps_url")
+                    or f"https://www.google.com/maps/search/?api=1&query={alt.get('latitude')},{alt.get('longitude')}",
+                    "distance_km": alt.get("distance_km"),
+                    "score": int(alt.get("score", 0)),
+                    "reason": alt.get("reason"),
+                    "navigation": alt.get("navigation") or {"route_available": False},
+                    "source": alt.get("source"),
+                }
+            )
 
         response = NearbyResponse(
-            current_location_score=current_score,
-            best_locations=best_locations,
-            recommended_locations=best_locations,
-            candidate_locations=candidate_locations,
-            pin_location=pin_location,
             best_spot=best_spot,
+            optimal_coordinates=optimal_coordinates,
             alternatives=alternatives,
-            note=(
-                "Best spot is ranked by live weather, astronomy, light pollution, and aurora score."
-                if best_spot
-                else "No verified nearby locations found. Try increasing radius."
-            ),
-            recommendation=recommendation,
-            message=message or None,
-            suggestion=suggestion or None,
-            data_sources=build_data_sources(
-                weather_status="live_or_fallback",
-                aurora_status="live_or_fallback",
-                nearby_status=(
-                    "live"
-                    if locations and (locations[0].get("source") == "Google Places API")
-                    else "live_or_empty"
-                ),
-                nearby_source=(
-                    "Google Places API"
-                    if locations and (locations[0].get("source") == "Google Places API")
-                    else "OpenStreetMap Overpass"
-                ),
-                ai_status=None,
-            ),
+            message=None,
+            note=note,
         )
         _nearby_cache.set(cache_key, response)
         return response
