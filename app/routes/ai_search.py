@@ -121,7 +121,9 @@ def _smart_time(query: str, target: str) -> str:
         else:
             hour = int(match.group(4))
             minute = 0
-            suffix = match.group(5).lower()
+            # Defensive: regex currently mandates am/pm in this branch, but
+            # tolerate future regex tweaks that make group 5 optional.
+            suffix = (match.group(5) or "").lower()
 
         if suffix == "pm" and hour < 12:
             hour += 12
