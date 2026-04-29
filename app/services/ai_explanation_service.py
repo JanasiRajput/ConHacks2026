@@ -23,7 +23,8 @@ _GEMINI_TIMEOUT_SECONDS = 12
 
 
 def _gemini_model() -> str:
-    return os.environ.get("GEMINI_MODEL", _GEMINI_DEFAULT_MODEL)
+    raw = os.environ.get("GEMINI_MODEL") or _GEMINI_DEFAULT_MODEL
+    return raw.strip() or _GEMINI_DEFAULT_MODEL
 
 
 def _gemini_url() -> str:
@@ -118,7 +119,8 @@ def generate_ai_response(data: Dict[str, Any]) -> Dict[str, Any]:
     - light_pollution
     - visible_objects
     """
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    api_key_raw = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    api_key = api_key_raw.strip() if api_key_raw else None
     fallback = _fallback_ai_response(data)
     if not api_key:
         return fallback

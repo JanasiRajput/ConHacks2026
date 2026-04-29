@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app.models.schemas import (
     AISearchRequest,
@@ -166,6 +166,7 @@ def _route_to_backend(
     latitude: float,
     longitude: float,
     location_name: str,
+    http_request: Request,
 ) -> Tuple[str, Dict[str, Any]]:
     """Run the parsed query through the existing services."""
     intent = parsed["intent"]
@@ -179,7 +180,11 @@ def _route_to_backend(
             latitude, longitude, date_str, parsed["time"]
         )
         events = sky_events_service.get_sky_events(
-            astronomy, date_str, latitude
+            astronomy=astronomy,
+            date=date_str,
+            latitude=latitude,
+            longitude=longitude,
+            time=parsed["time"],
         )
         return "sky_events", {
             "date": date_str,
@@ -203,7 +208,8 @@ def _route_to_backend(
                 longitude=longitude,
                 target=parsed["target"],
                 days=days,
-            )
+            ),
+            http_request=http_request,
         )
         return "future", future.model_dump()
 
@@ -217,7 +223,8 @@ def _route_to_backend(
             date=date_str,
             time=parsed["time"],
             target=parsed["target"],
-        )
+        ),
+        http_request=http_request,
     )
     return "plan", plan.model_dump()
 
@@ -282,13 +289,17 @@ def _fallback_answer(parsed: Dict[str, Any], data: Dict[str, Any], route: str) -
 # Endpoint
 # ---------------------------------------------------------------------------
 @router.post("/ai-search", response_model=AISearchResponse)
-def ai_search(request: AISearchRequest) -> AISearchResponse:
+def ai_search(request: AISearchRequest, http_request: Request) -> AISearchResponse:
     try:
+        client_ip = http_request.client.host if http_request.client else None
         latitude, longitude, location_name = location_service.resolve_location(
-            request.latitude, request.longitude, request.location_name
+            request.latitude, request.longitude, request.location_name,
+            client_ip=client_ip,
         )
         parsed = _parse_query(request.query)
-        route, data = _route_to_backend(parsed, latitude, longitude, location_name)
+        route, data = _route_to_backend(
+            parsed, latitude, longitude, location_name, http_request
+        )
 
         # Pull a representative score for the confidence calculation.
         if route == "future":
