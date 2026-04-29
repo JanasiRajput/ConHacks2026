@@ -99,6 +99,23 @@ class SkyResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# /api/astronomy - raw astronomy payload (service output)
+# ---------------------------------------------------------------------------
+class AstronomyRequest(BaseModel):
+    latitude: float
+    longitude: float
+    date: str
+    time: str
+
+
+class AstronomyResponse(BaseModel):
+    date: str
+    time: str
+    location: Dict[str, float]
+    astronomy: Dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
 # /api/aurora
 # ---------------------------------------------------------------------------
 class AuroraRequest(BaseModel):
