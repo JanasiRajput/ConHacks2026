@@ -41,7 +41,7 @@ http://127.0.0.1:8000/redoc
 | GET    | `/`               | Health check                                     |
 | POST   | `/api/plan`       | Full plan for a single date/time/target          |
 | POST   | `/api/future`     | Best-window forecast over the next N days        |
-| POST   | `/api/nearby`     | Nearby dark-sky locations (named via Nominatim)  |
+| POST   | `/api/nearby`     | Nearby locations ranked by weather conditions     |
 | POST   | `/api/sky`        | Data for the 3D sky visualization                |
 | POST   | `/api/aurora`     | Aurora forecast for a coordinate                 |
 | POST   | `/api/events`     | "What's up tonight" target-agnostic feed         |

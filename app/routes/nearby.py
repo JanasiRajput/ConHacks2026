@@ -1,4 +1,4 @@
-"""POST /api/nearby - nearby dark-sky finder."""
+"""POST /api/nearby - nearby real-location dark-sky finder."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _current_location_score(
     longitude: float,
     target: str,
 ) -> int:
-    """Use a default night window to estimate the score where the user is now."""
+    """Use a default night window to estimate score at current location."""
     today = datetime.utcnow().strftime("%Y-%m-%d")
     time = "23:00"
     upstream = parallel.gather({
@@ -52,7 +52,9 @@ def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyResponse
     try:
         client_ip = http_request.client.host if http_request.client else None
         latitude, longitude, _ = location_service.resolve_location(
-            request.latitude, request.longitude, request.location_name,
+            request.latitude,
+            request.longitude,
+            request.location_name,
             client_ip=client_ip,
         )
 
