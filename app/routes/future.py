@@ -74,11 +74,13 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
             client_ip=client_ip,
         )
 
-        days = max(1, min(30, int(request.days)))
+        # `request.days` is typed as int by Pydantic but stay defensive
+        # against odd payloads (e.g. strings, None) that bypass validation.
         try:
-            start = datetime.utcnow().date()
-        except Exception:  # pragma: no cover - defensive
-            start = datetime.utcnow().date()
+            days = max(1, min(30, int(request.days)))
+        except (TypeError, ValueError):
+            days = 7
+        start = datetime.utcnow().date()
 
         results: List[Dict[str, Any]] = []
         for offset in range(days):
