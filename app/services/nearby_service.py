@@ -89,12 +89,15 @@ def _evaluate_point(
         weather, astronomy, light_pollution, aurora, target
     )
 
+    bortle_class = int(light_pollution.get("bortle_class", 5))
     return {
+        "name": f"Site @ {latitude:.3f}, {longitude:.3f}",
         "latitude": latitude,
         "longitude": longitude,
         "distance_km": distance_km,
         "score": score,
-        "bortle_class": int(light_pollution.get("bortle_class", 5)),
+        "bortle_class": bortle_class,
+        "estimated_bortle_class": bortle_class,
         "reason": "Lower light pollution and better sky clarity",
         "weather_snapshot": {
             "cloud_cover": weather.get("cloud_cover"),

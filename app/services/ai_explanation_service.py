@@ -17,11 +17,17 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-_GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-pro:generateContent"
-)
+_GEMINI_API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
+_GEMINI_DEFAULT_MODEL = "gemini-2.0-flash"
 _GEMINI_TIMEOUT_SECONDS = 12
+
+
+def _gemini_model() -> str:
+    return os.environ.get("GEMINI_MODEL", _GEMINI_DEFAULT_MODEL)
+
+
+def _gemini_url() -> str:
+    return f"{_GEMINI_API_ROOT}/{_gemini_model()}:generateContent"
 
 
 def _quality_word(score: int) -> str:
@@ -112,7 +118,7 @@ def generate_ai_response(data: Dict[str, Any]) -> Dict[str, Any]:
     - light_pollution
     - visible_objects
     """
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     fallback = _fallback_ai_response(data)
     if not api_key:
         return fallback
@@ -144,7 +150,7 @@ def generate_ai_response(data: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         response = requests.post(
-            _GEMINI_URL,
+            _gemini_url(),
             params={"key": api_key},
             headers={"Content-Type": "application/json"},
             json=payload,
