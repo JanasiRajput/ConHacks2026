@@ -7,7 +7,28 @@ today; the same function signature can later wrap an LLM call.
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 from typing import Any, Dict
+
+import requests
+
+
+logger = logging.getLogger(__name__)
+
+_GEMINI_API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
+_GEMINI_DEFAULT_MODEL = "gemini-2.0-flash"
+_GEMINI_TIMEOUT_SECONDS = 12
+
+
+def _gemini_model() -> str:
+    raw = os.environ.get("GEMINI_MODEL") or _GEMINI_DEFAULT_MODEL
+    return raw.strip() or _GEMINI_DEFAULT_MODEL
+
+
+def _gemini_url() -> str:
+    return f"{_GEMINI_API_ROOT}/{_gemini_model()}:generateContent"
 
 
 def _quality_word(score: int) -> str:
@@ -88,6 +109,69 @@ def generate_plan_summary(
     return " ".join(lines)
 
 
+def generate_ai_response(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate a short Gemini-based explanation with fallback.
+
+    Expected input keys:
+    - score
+    - weather
+    - astronomy
+    - light_pollution
+    - visible_objects
+    """
+    api_key_raw = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    api_key = api_key_raw.strip() if api_key_raw else None
+    fallback = _fallback_ai_response(data)
+    if not api_key:
+        return fallback
+
+    score = data.get("score", 0)
+    weather = data.get("weather", {})
+    astronomy = data.get("astronomy", {})
+    light_pollution = data.get("light_pollution", {})
+    visible_objects = data.get("visible_objects", {})
+
+    prompt = (
+        "Explain astrophotography conditions in simple, helpful language. "
+        "Include what can be seen and best time. Keep it to 1-2 sentences.\n\n"
+        "Use this real backend data:\n"
+        f"{json.dumps({'score': score, 'weather': weather, 'astronomy': astronomy, 'light_pollution': light_pollution, 'visible_objects': visible_objects}, default=str)}"
+    )
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(
+            _gemini_url(),
+            params={"key": api_key},
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=_GEMINI_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        body = response.json()
+        answer = _extract_gemini_text(body)
+        if not answer:
+            return fallback
+        return {
+            "answer": answer,
+            "confidence": 90,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Gemini explanation failed, using fallback: %s", exc)
+        return fallback
+
+
 def generate_future_summary(best_result: Dict[str, Any]) -> str:
     if not best_result:
         return "No forecast windows available for the requested range."
@@ -105,3 +189,43 @@ def generate_future_summary(best_result: Dict[str, Any]) -> str:
         f"Plan for {window}, prepare your gear in advance, and arrive on "
         "site early to dark-adapt."
     )
+
+
+def _extract_gemini_text(body: Dict[str, Any]) -> str:
+    candidates = body.get("candidates") or []
+    if not candidates:
+        return ""
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    texts = [p.get("text", "") for p in parts if isinstance(p, dict)]
+    text = " ".join(t.strip() for t in texts if t and t.strip())
+    return " ".join(text.split())
+
+
+def _fallback_ai_response(data: Dict[str, Any]) -> Dict[str, Any]:
+    score = int(data.get("score", 0) or 0)
+    astronomy = data.get("astronomy", {}) or {}
+    weather = data.get("weather", {}) or {}
+    visible_objects = data.get("visible_objects", {}) or {}
+
+    mw_quality = astronomy.get("milky_way_quality", "unknown")
+    cloud_cover = weather.get("cloud_cover", "?")
+    planets = visible_objects.get("planets", []) or []
+    planets_text = ", ".join(planets[:2]) if planets else "no major planets"
+
+    if score >= 70:
+        answer = (
+            f"Conditions look good with a score of {score}/100: skies are around "
+            f"{cloud_cover}% cloud cover, Milky Way quality is {mw_quality.lower()}, "
+            f"and visible targets include {planets_text}; best results are usually from 22:00-03:00."
+        )
+    else:
+        answer = (
+            f"Conditions are moderate with a score of {score}/100 due to around "
+            f"{cloud_cover}% cloud cover and {mw_quality.lower()} Milky Way quality; "
+            f"you can still shoot brighter targets like {planets_text} between 22:00-03:00."
+        )
+
+    return {
+        "answer": answer,
+        "confidence": 65,
+    }

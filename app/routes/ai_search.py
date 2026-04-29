@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app.models.schemas import (
     AISearchRequest,
@@ -28,6 +28,7 @@ from app.services import (
     ai_explanation_service,
     astronomy_service,
     gemini_service,
+    location_service,
     sky_events_service,
 )
 
@@ -161,7 +162,11 @@ def _resolve_date(token: str) -> str:
 
 
 def _route_to_backend(
-    request: AISearchRequest, parsed: Dict[str, Any]
+    parsed: Dict[str, Any],
+    latitude: float,
+    longitude: float,
+    location_name: str,
+    http_request: Request,
 ) -> Tuple[str, Dict[str, Any]]:
     """Run the parsed query through the existing services."""
     intent = parsed["intent"]
@@ -172,14 +177,23 @@ def _route_to_backend(
     if intent == "visibility" and date_token in ("today", "tomorrow"):
         date_str = _resolve_date(date_token)
         astronomy = astronomy_service.get_astronomy_data(
-            request.latitude, request.longitude, date_str, parsed["time"]
+            latitude, longitude, date_str, parsed["time"]
         )
         events = sky_events_service.get_sky_events(
-            astronomy, date_str, request.latitude
+            astronomy=astronomy,
+            date=date_str,
+            latitude=latitude,
+            longitude=longitude,
+            time=parsed["time"],
         )
         return "sky_events", {
             "date": date_str,
             "time": parsed["time"],
+            "location": {
+                "name": location_name,
+                "latitude": latitude,
+                "longitude": longitude,
+            },
             "astronomy": astronomy,
             "sky_events": events,
         }
@@ -190,11 +204,12 @@ def _route_to_backend(
         future = predict_future(
             FutureRequest(
                 location_name="Your Location",
-                latitude=request.latitude,
-                longitude=request.longitude,
+                latitude=latitude,
+                longitude=longitude,
                 target=parsed["target"],
                 days=days,
-            )
+            ),
+            http_request=http_request,
         )
         return "future", future.model_dump()
 
@@ -202,13 +217,14 @@ def _route_to_backend(
     date_str = _resolve_date(date_token)
     plan = create_plan(
         PlanRequest(
-            location_name="Your Location",
-            latitude=request.latitude,
-            longitude=request.longitude,
+            location_name=location_name,
+            latitude=latitude,
+            longitude=longitude,
             date=date_str,
             time=parsed["time"],
             target=parsed["target"],
-        )
+        ),
+        http_request=http_request,
     )
     return "plan", plan.model_dump()
 
@@ -273,10 +289,17 @@ def _fallback_answer(parsed: Dict[str, Any], data: Dict[str, Any], route: str) -
 # Endpoint
 # ---------------------------------------------------------------------------
 @router.post("/ai-search", response_model=AISearchResponse)
-def ai_search(request: AISearchRequest) -> AISearchResponse:
+def ai_search(request: AISearchRequest, http_request: Request) -> AISearchResponse:
     try:
+        client_ip = http_request.client.host if http_request.client else None
+        latitude, longitude, location_name = location_service.resolve_location(
+            request.latitude, request.longitude, request.location_name,
+            client_ip=client_ip,
+        )
         parsed = _parse_query(request.query)
-        route, data = _route_to_backend(request, parsed)
+        route, data = _route_to_backend(
+            parsed, latitude, longitude, location_name, http_request
+        )
 
         # Pull a representative score for the confidence calculation.
         if route == "future":

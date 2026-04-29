@@ -52,7 +52,11 @@ def whats_up_tonight(request: EventsRequest) -> EventsResponse:
             request.latitude, request.longitude, request.date, request.time
         )
         sky_events = sky_events_service.get_sky_events(
-            astronomy, request.date, request.latitude
+            astronomy=astronomy,
+            date=request.date,
+            latitude=request.latitude,
+            longitude=request.longitude,
+            time=request.time,
         )
         aurora = aurora_service.get_aurora_data(request.latitude, request.longitude)
 
