@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_MODEL = "gemini-2.0-flash"
-_TIMEOUT_SECONDS = 12
+_TIMEOUT_SECONDS = 5
 _API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
 
 

@@ -18,33 +18,48 @@ from app.services import (
     scoring_service,
     weather_service,
 )
+from app.services.cache import TTLCache
+from app.services.parallel import gather
 from app.routes.planner import _recommendation_for
 
 
 router = APIRouter(tags=["future"])
 
-_TIME_WINDOWS = ["22:00", "00:00", "02:00"]
+# We pick a single representative time per night ("midnight local") rather
+# than scoring 22:00, 00:00 and 02:00 separately. Light pollution and
+# aurora forecast are the same for all three windows, and astronomical
+# darkness/moon position barely shift across them - the score difference
+# was rarely meaningful and tripled our upstream load.
+_NIGHT_TIME = "00:00"
+
+# Scope: identical (rounded coords, target, days) request -> same answer
+# for ~2 minutes. Smooths out repeated calls from BestNights as the user
+# drags the time slider on the main /plan endpoint.
+_future_cache: TTLCache = TTLCache(ttl_seconds=120.0, max_entries=128)
 
 
-def _evaluate(
+def _evaluate_day(
     latitude: float,
     longitude: float,
     date: str,
-    time: str,
     target: str,
+    *,
+    light_pollution: Dict[str, Any],
+    aurora: Dict[str, Any],
 ) -> Dict[str, Any]:
-    weather = weather_service.get_weather_data(latitude, longitude, date, time)
-    astronomy = astronomy_service.get_astronomy_data(latitude, longitude, date, time)
-    light_pollution = light_pollution_service.get_light_pollution_data(
-        latitude, longitude
+    """Score one night. Light pollution and aurora are passed in because
+    they're location-only / now-only and should be fetched once for the
+    whole forecast, not refetched per-day."""
+    weather = weather_service.get_weather_data(latitude, longitude, date, _NIGHT_TIME)
+    astronomy = astronomy_service.get_astronomy_data(
+        latitude, longitude, date, _NIGHT_TIME
     )
-    aurora = aurora_service.get_aurora_data(latitude, longitude)
     score, breakdown = scoring_service.calculate_score(
         weather, astronomy, light_pollution, aurora, target
     )
     return {
         "date": date,
-        "time": time,
+        "time": _NIGHT_TIME,
         "target": target,
         "score": score,
         "sky_quality": scoring_service.get_sky_quality(score),
@@ -74,33 +89,53 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
             client_ip=client_ip,
         )
 
-        # `request.days` is typed as int by Pydantic but stay defensive
-        # against odd payloads (e.g. strings, None) that bypass validation.
         try:
             days = max(1, min(30, int(request.days)))
         except (TypeError, ValueError):
             days = 7
+
+        cache_key = (
+            round(latitude, 3),
+            round(longitude, 3),
+            request.target,
+            days,
+        )
+        cached = _future_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         start = datetime.utcnow().date()
+        date_strs = [
+            (start + timedelta(days=offset)).strftime("%Y-%m-%d")
+            for offset in range(days)
+        ]
 
-        results: List[Dict[str, Any]] = []
-        for offset in range(days):
-            day = start + timedelta(days=offset)
-            date_str = day.strftime("%Y-%m-%d")
-            for window in _TIME_WINDOWS:
-                results.append(
-                    _evaluate(
-                        latitude,
-                        longitude,
-                        date_str,
-                        window,
-                        request.target,
-                    )
-                )
+        # Fetch the location-only data once for the whole forecast.
+        shared = gather({
+            "light_pollution": lambda: light_pollution_service.get_light_pollution_data(
+                latitude, longitude
+            ),
+            "aurora": lambda: aurora_service.get_aurora_data(latitude, longitude),
+        })
+        light_pollution = shared["light_pollution"]
+        aurora = shared["aurora"]
 
-        results.sort(key=lambda item: item["score"], reverse=True)
-        best = results[0]
+        # Fan out the per-day evaluations. Each one issues its own
+        # weather call; running them concurrently turns ~7 sequential
+        # network round-trips into a single parallel batch.
+        evaluations = gather({
+            d: (lambda day=d: _evaluate_day(
+                latitude, longitude, day, request.target,
+                light_pollution=light_pollution, aurora=aurora,
+            ))
+            for d in date_strs
+        })
 
-        # Compute the real best observation window for the winning date.
+        results: List[Dict[str, Any]] = [evaluations[d] for d in date_strs]
+        sorted_results = sorted(results, key=lambda item: item["score"], reverse=True)
+        best = sorted_results[0]
+
+        # Compute the real best observation window only for the winner.
         best_window = observation_window_service.compute_best_window(
             latitude, longitude, best["date"], request.target
         )
@@ -112,7 +147,7 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
         best["best_window"] = best_window_str
         best["best_window_detail"] = best_window
 
-        return FutureResponse(
+        response = FutureResponse(
             best_date=best["date"],
             best_time=best["time"],
             best_score=best["score"],
@@ -121,6 +156,8 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
             recommendation=_recommendation_for(best["score"]),
             ai_summary=ai_explanation_service.generate_future_summary(best),
         )
+        _future_cache.set(cache_key, response)
+        return response
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
