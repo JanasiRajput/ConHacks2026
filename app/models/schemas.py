@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 # /api/plan
 # ---------------------------------------------------------------------------
 class PlanRequest(BaseModel):
-    location_name: Optional[str] = "Unknown Location"
+    location_name: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     date: str

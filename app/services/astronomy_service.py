@@ -397,6 +397,7 @@ def _calculate_with_skyfield(
         "milky_way_core_azimuth": round(core_azimuth, 2),
         "moon_core_separation": round(moon_core_separation, 2),
         "darkness_level": _darkness_level(sun_altitude),
+        "source": "Skyfield + JPL DE421",
     }
 
 
@@ -620,6 +621,7 @@ def _fallback_astronomy(
         "milky_way_core_altitude": mw_core_altitude if mw_visible else 0.0,
         "milky_way_core_azimuth": mw_core_azimuth,
         "darkness_level": _darkness_level(sun_altitude),
+        "source": "fallback",
     }
 
 
