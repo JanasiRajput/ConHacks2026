@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 _OVERPASS_URL = os.environ.get(
     "OVERPASS_URL", "https://overpass-api.de/api/interpreter"
 )
-_OVERPASS_TIMEOUT = float(os.environ.get("OVERPASS_TIMEOUT", "4.0"))
+_OVERPASS_TIMEOUT = float(os.environ.get("OVERPASS_TIMEOUT", "10.0"))
 _LOOKUP_RADIUS_KM = 80.0  # half-light radius for skyglow contribution
 _CACHE_TTL_SECONDS = 24 * 60 * 60
 _CACHE_KEY_PRECISION = 0.05  # ~5 km grid

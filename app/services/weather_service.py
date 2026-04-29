@@ -115,6 +115,7 @@ def _fetch_open_meteo(
         "temperature_c": round(temperature_c, 1),
         "wind_speed_kmh": round(max(0.0, wind_speed_kmh), 1),
         "condition": _condition_from(cloud_cover),
+        "source": "Open-Meteo",
     }
 
 
@@ -241,4 +242,5 @@ def _fallback_weather(
         "temperature_c": temperature_c,
         "wind_speed_kmh": wind_speed_kmh,
         "condition": _condition_from(cloud_cover),
+        "source": "fallback",
     }

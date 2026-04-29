@@ -117,6 +117,11 @@ def resolve_location(
     tests or rate-limited environments).
     """
     name_clean = (location_name or "").strip()
+    # Defensive: older clients (and the legacy schema default) sent the
+    # placeholder string "Unknown Location" - never honour it as a real
+    # name; reverse-geocode the coords instead.
+    if name_clean.lower() in {"unknown location", "your location", "unknown"}:
+        name_clean = ""
 
     # 1) Explicit coordinates win.
     if latitude is not None and longitude is not None:
