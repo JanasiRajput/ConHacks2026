@@ -67,9 +67,31 @@ def create_plan(request: PlanRequest) -> PlanResponse:
         )
 
         camera_settings = scoring_service.get_camera_settings(request.target, score)
-        ai_summary = ai_explanation_service.generate_plan_summary(
-            score, weather, astronomy, light_pollution, aurora, request.target
+        ai_response = ai_explanation_service.generate_ai_response(
+            {
+                "score": score,
+                "weather": weather,
+                "astronomy": astronomy,
+                "light_pollution": light_pollution,
+                "visible_objects": {
+                    "planets": [
+                        p.get("name")
+                        for p in (sky_events.get("visible_planets") or [])
+                        if p.get("name")
+                    ],
+                    "constellations": sky_events.get("visible_constellations", []),
+                    "meteor_shower": (
+                        (sky_events.get("active_meteor_shower") or {}).get("name")
+                    ),
+                    "milky_way_direction": (
+                        (sky_events.get("milky_way_direction") or {}).get(
+                            "compass_direction"
+                        )
+                    ),
+                },
+            }
         )
+        ai_summary = ai_response["answer"]
 
         return PlanResponse(
             visibility_score=score,
