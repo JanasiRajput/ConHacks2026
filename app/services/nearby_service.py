@@ -89,8 +89,88 @@ _GOOGLE_TYPES_REJECT = frozenset(
         "real_estate_agency",
         "bank",
         "atm",
+        "bakery",
+        "beauty_salon",
+        "car_dealer",
+        "car_repair",
+        "car_wash",
+        "dentist",
+        "doctor",
+        "hair_care",
+        "hvac_contractor",
+        "insurance_agency",
+        "lawyer",
+        "meal_delivery",
+        "pharmacy",
+        "roofing_contractor",
+        "veterinary_care",
     }
 )
+
+_OSM_REJECT_AMENITY = frozenset({
+    "restaurant",
+    "cafe",
+    "fast_food",
+    "food_court",
+    "bar",
+    "pub",
+    "biergarten",
+    "fuel",
+    "charging_station",
+    "parking",
+    "bank",
+    "atm",
+    "marketplace",
+    "pharmacy",
+    "hospital",
+    "clinic",
+    "dentist",
+    "doctors",
+    "veterinary",
+    "nightclub",
+})
+
+_OSM_REJECT_LEISURE = frozenset({
+    "bowling_alley",
+    "golf_course",
+    "water_park",
+    "marina",
+    "stadium",
+    "sports_hall",
+    "fitness_centre",
+    "amusement_arcade",
+    "dance",
+    "nightclub",
+})
+
+_OSM_REJECT_BUILDING = frozenset({
+    "commercial",
+    "retail",
+    "office",
+    "warehouse",
+    "supermarket",
+    "apartments",
+    "dormitory",
+    "industrial",
+})
+
+_OSM_REJECT_LANDUSE = frozenset({
+    "commercial",
+    "retail",
+    "industrial",
+    "military",
+})
+
+_OSM_REJECT_TOURISM = frozenset({
+    "museum",
+    "hotel",
+    "motel",
+    "guest_house",
+    "hostel",
+    "apartment",
+    "chalet",
+    "gallery",
+})
 
 NEARBY_MAX_GOOGLE_CANDIDATES = 10
 NEARBY_MAX_GRID_POINTS = 25
@@ -165,6 +245,73 @@ def _name_suggests_non_dark_site(name: str) -> bool:
     return bool(_NON_ASTRO_NAME_RE.search(name or ""))
 
 
+def _norm_osm(val: Any) -> str:
+    return str(val or "").strip().lower()
+
+
+def passes_osm_sky_place_tags(name: str, tags: Dict[str, Any]) -> bool:
+    """Named OSM feature is allowed as a parks/viewpoints recommendation (filters retail/commercial)."""
+    nm = str(name or "").strip()
+    if not nm or _name_suggests_non_dark_site(nm):
+        return False
+    tg = tags if isinstance(tags, dict) else {}
+    return not _osm_tags_indicate_bad_sighting(tg)
+
+
+def _osm_tags_indicate_bad_sighting(tags: Dict[str, Any]) -> bool:
+    """Reject OSM features tagged like retail/commercial/indoor venues (not viewpoints)."""
+    if not isinstance(tags, dict) or not tags:
+        return False
+    if tags.get("google_place_type"):
+        return False
+    amenity = _norm_osm(tags.get("amenity"))
+    if amenity in _OSM_REJECT_AMENITY:
+        return True
+    leisure = _norm_osm(tags.get("leisure"))
+    if leisure in _OSM_REJECT_LEISURE:
+        return True
+    shop = tags.get("shop")
+    if shop is not None and _norm_osm(shop) not in {"", "no"}:
+        return True
+    office = tags.get("office")
+    if office is not None and _norm_osm(office) not in {"", "no"}:
+        return True
+    building = _norm_osm(tags.get("building"))
+    if building in _OSM_REJECT_BUILDING:
+        return True
+    landuse = _norm_osm(tags.get("landuse"))
+    if landuse in _OSM_REJECT_LANDUSE:
+        return True
+    tourism = _norm_osm(tags.get("tourism"))
+    if tourism and tourism != "viewpoint" and tourism in _OSM_REJECT_TOURISM:
+        return True
+    return False
+
+
+def raw_place_candidate_dict_allowed(place: Dict[str, Any]) -> bool:
+    """Gate for uncached pipelines: consistent name/Google/OSM rejects before scoring."""
+    name = str(place.get("name") or "").strip()
+    tags = place.get("tags") if isinstance(place.get("tags"), dict) else {}
+    if not passes_osm_sky_place_tags(name, tags):
+        return False
+    gtypes = place.get("google_types")
+    if not gtypes and isinstance(tags, dict):
+        nested = tags.get("google_types")
+        if nested:
+            gtypes = nested
+    if google_primary_types_blocked(gtypes):
+        return False
+    nl = name.lower()
+    if re.search(
+        r"\b(convention\s+center|community\s+center|office\s+park|tower|"
+        r"commercial\s+(centre|center)|business\s+park|courthouse)\b",
+        nl,
+        re.IGNORECASE,
+    ):
+        return False
+    return True
+
+
 def google_primary_types_blocked(types: Any) -> bool:
     """True if Google ``types`` includes any disallowed primary category."""
     if not types or not isinstance(types, (list, tuple)):
@@ -183,7 +330,8 @@ def passes_nearby_real_place(row: Dict[str, Any]) -> bool:
         return False
     if re.search(
         r"\b(restaurant|café|cafe|bar|food|store|shopping|mall|plaza|school|university|"
-        r"lodging|motel|hotel|church|temple|gurudwara|gurdwara)\b",
+        r"lodging|motel|hotel|church|temple|gurudwara|gurdwara|museum|tower|business\s+park)"
+        r"\b",
         nl,
         re.IGNORECASE,
     ):
@@ -419,7 +567,8 @@ def _google_nearby_item_allowed(item: Dict[str, Any]) -> bool:
         return False
     nl = name.lower()
     if re.search(
-        r"\b(restaurant|café|cafe|bar|food|meal|takeaway|store|lodging|hotel|motel)\b",
+        r"\b(restaurant|café|cafe|bar|food|meal|takeaway|store|shopping|lodging|hotel|motel"
+        r"|museum|tower|commercial|office\s+park|business\s+park)\b",
         nl,
         re.IGNORECASE,
     ):
@@ -678,7 +827,7 @@ def _fetch_osm_places_only(latitude: float, longitude: float, radius_km: int) ->
     for el in elements:
         tags = el.get("tags") or {}
         name = (tags.get("name") or "").strip()
-        if not name or _name_suggests_non_dark_site(name):
+        if not passes_osm_sky_place_tags(name, tags):
             continue
         lat, lon = _element_coordinates(el)
         if lat is None or lon is None:
@@ -706,9 +855,9 @@ def _fetch_osm_places_only(latitude: float, longitude: float, radius_km: int) ->
 
 def _fetch_real_places(latitude: float, longitude: float, radius_km: int) -> List[Dict[str, Any]]:
     google_places = _fetch_google_places(latitude, longitude, radius_km)
-    if google_places:
-        return google_places
-    return _fetch_osm_places_only(latitude, longitude, radius_km)
+    merged = google_places if google_places else _fetch_osm_places_only(latitude, longitude, radius_km)
+    merged = [p for p in merged if raw_place_candidate_dict_allowed(p)]
+    return merged
 
 
 def _evaluate_point(
@@ -1290,7 +1439,8 @@ async def collect_scored_places_near_optimal_async(
         )
     if not raw:
         return []
-    take = raw[:max_candidates]
+    raw_filtered = [p for p in raw if raw_place_candidate_dict_allowed(p)]
+    take = raw_filtered[:max_candidates]
     semaphore = asyncio.Semaphore(concurrency)
 
     async def _one(place: Dict[str, Any]) -> Dict[str, Any] | None:
@@ -1314,7 +1464,7 @@ async def collect_scored_places_near_optimal_async(
 
     rows = await asyncio.gather(*(_one(p) for p in take), return_exceptions=True)
     evaluated = [r for r in rows if isinstance(r, dict)]
-    evaluated = [r for r in evaluated if passes_nearby_real_place(r)]
+    evaluated = [r for r in evaluated if passes_astro_place_filters(r)]
     evaluated.sort(key=lambda r: int(r.get("score", 0)), reverse=True)
     return evaluated[:4]
 
@@ -1400,10 +1550,11 @@ def list_real_named_places(
     """Return named OSM candidates only (no weather/score evaluation).
 
     Used by ``/api/upcoming-moments`` so we never invent coordinates:
-    every row comes from the same Overpass pipeline as
-    :func:`get_nearby_dark_locations`.
+    every row comes from Overpass (parks, reserves, viewpoints, dark-sky tags)
+    with the same venue filters as other location APIs — no Google POIs here.
     """
-    return _fetch_real_places(latitude, longitude, radius_km)
+    places = _fetch_osm_places_only(latitude, longitude, radius_km)
+    return [p for p in places if raw_place_candidate_dict_allowed(p)]
 
 
 def get_nearby_dark_locations(

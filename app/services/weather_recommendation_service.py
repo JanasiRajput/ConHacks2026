@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple, Union
 
 import requests
 
-from app.services import weather_service
+from app.services import nearby_service, weather_service
 
 _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 _OVERPASS_TIMEOUT_SECONDS = 18
@@ -85,6 +85,8 @@ def _candidate_locations(latitude: float, longitude: float, radius_km: int) -> L
         tags = el.get("tags") or {}
         name = str(tags.get("name") or "").strip()
         if not name:
+            continue
+        if not nearby_service.passes_osm_sky_place_tags(name, tags):
             continue
         lat, lon = _element_coordinates(el)
         if lat is None or lon is None:
