@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Wind, BarChart2, MapPin, Calendar, Clock, Search, ChevronRight, ChevronLeft, Loader2 } from 'lucide-react';
+import { Wind, BarChart2, MapPin, Calendar, Clock, Search, ChevronRight, ChevronLeft, Loader2, Route, Telescope, Camera } from 'lucide-react';
 import Toggle from './toggle';
-import { getPlan, getEvents, getNearby, getAutocomplete, geocode } from '../services/api';
+import { getPlan, getEvents, getNearby, getAutocomplete, geocode, getFuture, getAstronomy } from '../services/api';
 import RealWorldMap from './RealWorldMap';
 
 const fadeInUp = {
@@ -85,7 +85,13 @@ export default function Overlay() {
   const [planData, setPlanData] = useState(null);
   const [eventsData, setEventsData] = useState(null);
   const [nearbyData, setNearbyData] = useState(null);
+  const [futureData, setFutureData] = useState(null);
+  const [astronomyData, setAstronomyData] = useState(null);
   const [locationLabel, setLocationLabel] = useState('');
+  const [activeCoords, setActiveCoords] = useState(null);
+  const [customDate, setCustomDate] = useState(nowISO().date);
+  const [customTime, setCustomTime] = useState(nowISO().time);
+  const [planningCustom, setPlanningCustom] = useState(false);
 
   /* --- geocode + search --- */
   const geocodeAndSearch = useCallback(async (query) => {
@@ -101,17 +107,22 @@ export default function Overlay() {
       name = resolved.name;
 
       setLocationLabel(name);
+      setActiveCoords({ latitude, longitude });
       const { date, time } = nowISO();
 
-      const [plan, events, nearby] = await Promise.all([
+      const [plan, events, nearby, future, astronomy] = await Promise.all([
         getPlan({ latitude, longitude, locationName: name, date, time }).catch(() => null),
         getEvents({ latitude, longitude, date, time }).catch(() => null),
         getNearby({ latitude, longitude, locationName: name }).catch(() => null),
+        getFuture({ latitude, longitude, locationName: name, days: 7 }).catch(() => null),
+        getAstronomy({ latitude, longitude, date, time }).catch(() => null),
       ]);
 
       setPlanData(plan);
       setEventsData(events);
       setNearbyData(nearby);
+      setFutureData(future);
+      setAstronomyData(astronomy);
     } catch (err) {
       console.error(err);
       setError(err.message || 'Something went wrong — is the backend running?');
@@ -208,6 +219,73 @@ export default function Overlay() {
         { label: 'Best Night This Week', value: '—' },
         { label: 'Recommended Window', value: '—' },
       ];
+
+  const futureItems = futureData?.results?.slice(0, 5) ?? [];
+  const astronomyPlanets = astronomyData?.astronomy?.planets ?? [];
+  const astronomyStars = astronomyData?.astronomy?.stars ?? [];
+  const astronomyConsts = astronomyData?.astronomy?.constellations ?? [];
+
+  const directionItems = [
+    {
+      label: 'Aurora',
+      altitude: planData?.astronomy?.aurora_altitude ?? null,
+      azimuth: planData?.astronomy?.aurora_azimuth ?? null,
+      source: 'Live /plan',
+    },
+    {
+      label: 'Milky Way Core',
+      altitude: planData?.astronomy?.milky_way_core_altitude ?? null,
+      azimuth: planData?.astronomy?.milky_way_core_azimuth ?? null,
+      source: 'Live /plan',
+    },
+    {
+      label: 'Moon',
+      altitude: planData?.astronomy?.moon_altitude ?? null,
+      azimuth: planData?.astronomy?.moon_azimuth ?? null,
+      source: 'Live /plan',
+    },
+    {
+      label: 'Sun',
+      altitude: planData?.astronomy?.sun_altitude ?? null,
+      azimuth: planData?.astronomy?.sun_azimuth ?? null,
+      source: 'Live /plan',
+    },
+  ].filter((item) => item.altitude != null && item.azimuth != null);
+
+  const cameraCards = planData?.camera_settings
+    ? Object.entries(planData.camera_settings)
+        .filter(([, val]) => val !== null && val !== undefined && `${val}`.trim() !== '')
+        .map(([key, val]) => ({
+          key: key.replace(/_/g, ' ').toUpperCase(),
+          value: String(val),
+        }))
+    : [];
+
+  const runCustomPlan = async () => {
+    if (!activeCoords?.latitude || !activeCoords?.longitude || !customDate || !customTime) return;
+    setPlanningCustom(true);
+    try {
+      const plan = await getPlan({
+        latitude: activeCoords.latitude,
+        longitude: activeCoords.longitude,
+        locationName: locationLabel || null,
+        date: customDate,
+        time: customTime,
+      });
+      setPlanData(plan);
+      const astronomy = await getAstronomy({
+        latitude: activeCoords.latitude,
+        longitude: activeCoords.longitude,
+        date: customDate,
+        time: customTime,
+      }).catch(() => null);
+      setAstronomyData(astronomy);
+    } catch (err) {
+      setError(err.message || 'Failed to run plan for selected date/time');
+    } finally {
+      setPlanningCustom(false);
+    }
+  };
 
   const cards = [
     {
@@ -383,7 +461,157 @@ export default function Overlay() {
           ))}
         </div>
       )
-    }
+    },
+    {
+      id: 'time-plan',
+      title: '06 // Manual Plan Time (Calls /plan)',
+      icon: Clock,
+      color: 'from-cyan-500/20 to-indigo-500/10',
+      accent: 'text-cyan-300',
+      content: (
+        <div className="space-y-4 font-card">
+          <p className="text-sm text-slate-300">Set date/time and run a fresh plan for this location.</p>
+          <div className="grid grid-cols-2 gap-3">
+            <input
+              type="date"
+              value={customDate}
+              onChange={(e) => setCustomDate(e.target.value)}
+              className="bg-slate-900/70 border border-white/15 rounded-lg px-3 py-2 text-sm text-white"
+            />
+            <input
+              type="time"
+              value={customTime}
+              onChange={(e) => setCustomTime(e.target.value)}
+              className="bg-slate-900/70 border border-white/15 rounded-lg px-3 py-2 text-sm text-white"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={runCustomPlan}
+            disabled={planningCustom || !activeCoords}
+            className="w-full bg-cyan-400 text-slate-950 font-bold py-3 rounded-xl disabled:opacity-60"
+          >
+            {planningCustom ? 'RUNNING /PLAN...' : 'RUN /PLAN FOR SELECTED DATE & TIME'}
+          </button>
+          <div className="p-4 bg-white/5 border border-white/10 rounded-xl">
+            <p className="text-sm text-slate-300">Showing conditions for:</p>
+            <p className="text-lg font-bold text-cyan-200 mt-1">{planData ? `${planData.date} ${planData.time}` : 'No plan loaded yet'}</p>
+            <p className="text-sm text-slate-400 mt-2">Window: {planData?.best_window ?? '—'}</p>
+          </div>
+        </div>
+      )
+    },
+    {
+      id: 'future',
+      title: '07 // Upcoming Days Forecast (Calls /future)',
+      icon: Calendar,
+      color: 'from-violet-500/20 to-blue-500/10',
+      accent: 'text-violet-300',
+      content: (
+        <div className="space-y-3 font-card">
+          <div className="p-4 bg-white/5 border border-white/10 rounded-xl">
+            <p className="text-sm text-slate-300">Best upcoming night</p>
+            <p className="text-xl font-bold text-violet-200 mt-1">{futureData ? `${futureData.best_date} @ ${futureData.best_time}` : 'Search a location to load'}</p>
+            <p className="text-sm text-slate-400 mt-1">Score: {futureData?.best_score ?? '—'} · Window: {futureData?.best_window ?? '—'}</p>
+          </div>
+          {futureItems.map((day, idx) => (
+            <div key={`${day.date}-${idx}`} className="p-3 bg-slate-900/45 border border-white/10 rounded-lg flex justify-between items-center">
+              <div>
+                <p className="text-sm font-semibold text-white">{day.date}</p>
+                <p className="text-xs text-slate-400">{day.sky_quality} · Clouds {day.weather_summary?.cloud_cover ?? '—'}%</p>
+              </div>
+              <p className="text-lg font-bold text-violet-300">{day.score ?? '—'}</p>
+            </div>
+          ))}
+        </div>
+      )
+    },
+    {
+      id: 'directions',
+      title: '08 // Direction Guide (Aurora & Objects)',
+      icon: Route,
+      color: 'from-emerald-500/20 to-cyan-500/10',
+      accent: 'text-emerald-300',
+      content: (
+        <div className="space-y-3 font-card">
+          {directionItems.length === 0 && (
+            <div className="p-4 bg-white/5 border border-white/10 rounded-xl text-sm text-slate-300">
+              Search a location to load live directional guidance.
+            </div>
+          )}
+          {directionItems.map((item) => (
+            <div key={item.label} className="p-4 bg-white/5 border border-white/10 rounded-xl">
+              <p className="text-base font-bold text-emerald-200">{item.label}</p>
+              <p className="text-sm text-slate-300 mt-1">Altitude: {Number(item.altitude).toFixed(1)}° · Azimuth: {Number(item.azimuth).toFixed(1)}°</p>
+              <p className="text-xs uppercase tracking-wider text-slate-500 mt-2">{item.source}</p>
+            </div>
+          ))}
+        </div>
+      )
+    },
+    {
+      id: 'astronomy',
+      title: '09 // Astronomy Objects (Calls /astronomy)',
+      icon: Telescope,
+      color: 'from-fuchsia-500/20 to-indigo-500/10',
+      accent: 'text-fuchsia-300',
+      content: (
+        <div className="space-y-4 font-card">
+          <p className="text-sm text-slate-300">Visible planets, stars, and constellations for selected date/time.</p>
+          <div className="space-y-2">
+            <p className="text-xs tracking-[0.25em] text-slate-400 uppercase">Planets</p>
+            <div className="flex gap-2 overflow-x-auto slide-scroll pb-1">
+              {(astronomyPlanets.length ? astronomyPlanets : [{ name: 'No planet data yet' }]).map((p, i) => (
+                <div key={`pl-${i}`} className="min-w-[180px] p-3 bg-white/5 border border-white/10 rounded-xl">
+                  <p className="font-semibold text-fuchsia-200">{p.name}</p>
+                  <p className="text-xs text-slate-400 mt-1">Alt {p.altitude ?? '—'}° · Az {p.azimuth ?? '—'}°</p>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="space-y-2">
+            <p className="text-xs tracking-[0.25em] text-slate-400 uppercase">Stars</p>
+            <div className="flex gap-2 overflow-x-auto slide-scroll pb-1">
+              {(astronomyStars.slice(0, 12).length ? astronomyStars.slice(0, 12) : [{ name: 'No star data yet' }]).map((s, i) => (
+                <div key={`st-${i}`} className="min-w-[180px] p-3 bg-white/5 border border-white/10 rounded-xl">
+                  <p className="font-semibold text-cyan-200">{s.name}</p>
+                  <p className="text-xs text-slate-400 mt-1">Alt {s.altitude ?? '—'}° · Az {s.azimuth ?? '—'}°</p>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="space-y-2">
+            <p className="text-xs tracking-[0.25em] text-slate-400 uppercase">Constellations</p>
+            <div className="flex gap-2 overflow-x-auto slide-scroll pb-1">
+              {(astronomyConsts.slice(0, 10).length ? astronomyConsts.slice(0, 10) : [{ name: 'No constellation data yet' }]).map((c, i) => (
+                <div key={`co-${i}`} className="min-w-[200px] p-3 bg-white/5 border border-white/10 rounded-xl">
+                  <p className="font-semibold text-indigo-200">{c.name}</p>
+                  <p className="text-xs text-slate-400 mt-1">Alt {c.altitude ?? '—'}° · Az {c.azimuth ?? '—'}°</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )
+    },
+    {
+      id: 'camera',
+      title: '10 // Best Camera Angles',
+      icon: Camera,
+      color: 'from-amber-500/20 to-orange-500/10',
+      accent: 'text-amber-300',
+      content: (
+        <div className="space-y-3 font-card">
+          <p className="text-sm text-slate-300">Recommended capture settings from current plan conditions.</p>
+          {(cameraCards.length ? cameraCards : [{ key: 'NO CAMERA DATA', value: 'Run a search and /plan first' }]).map((item, idx) => (
+            <div key={`${item.key}-${idx}`} className="p-4 bg-white/5 border border-white/10 rounded-xl flex justify-between items-center">
+              <p className="text-xs tracking-[0.2em] text-slate-400">{item.key}</p>
+              <p className="text-sm font-bold text-amber-200 text-right">{item.value}</p>
+            </div>
+          ))}
+        </div>
+      )
+    },
   ];
 
   const nextCard = () => setActiveCard((prev) => (prev + 1) % cards.length);
@@ -629,7 +857,7 @@ export default function Overlay() {
           {/* Card Stack Carousel */}
           <div 
             ref={cardContainerRef}
-            className="relative z-20 w-full max-w-2xl h-[500px] flex items-center justify-center"
+            className="relative z-20 w-full max-w-2xl h-[680px] flex items-center justify-center"
           >
             <button 
               onClick={prevCard}
@@ -667,7 +895,7 @@ export default function Overlay() {
                           </h3>
                         </div>
                       </div>
-                      <div className="flex-1 overflow-y-auto pr-2 space-y-4 min-h-0">
+                      <div className="flex-1 overflow-y-auto slide-scroll pr-2 space-y-4 min-h-0">
                         {card.content}
                       </div>
 
