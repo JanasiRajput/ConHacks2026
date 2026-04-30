@@ -7,9 +7,19 @@ export default function RealWorldMap({ location, onClose }) {
   const viewerRef = useRef(null);
   const [error, setError] = useState(null);
 
+  const pinColorForScore = (score) => {
+    const numeric = Number(score);
+    if (!Number.isFinite(numeric)) return Cesium.Color.fromCssColorString('#00f3ff');
+    if (numeric >= 85) return Cesium.Color.LIME;
+    if (numeric >= 70) return Cesium.Color.YELLOW;
+    if (numeric >= 50) return Cesium.Color.ORANGE;
+    return Cesium.Color.RED;
+  };
+
   useEffect(() => {
     if (!cesiumContainer.current) return;
-    
+    let isDisposed = false;
+
     // Set Ion token for Cesium assets (optional, but helps with base terrain)
     // The Google Photorealistic 3D Tiles API key is separate.
     Cesium.Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN || ''; 
@@ -30,7 +40,7 @@ export default function RealWorldMap({ location, onClose }) {
         navigationInstructionsInitiallyVisible: false,
         requestRenderMode: true,
         maximumRenderTimeChange: Infinity,
-        globe: false, // We hide the default globe since we use Google 3D Tiles
+        globe: true,
       });
       viewerRef.current = viewer;
 
@@ -38,17 +48,21 @@ export default function RealWorldMap({ location, onClose }) {
       viewer.cesiumWidget.creditContainer.style.display = "none";
 
       const loadGoogleTiles = async () => {
+        const mapsKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+        if (!mapsKey) {
+          setError('Google 3D tiles key is missing. Showing base globe fallback.');
+          return;
+        }
         try {
           const tileset = await Cesium.createGooglePhotorealistic3DTileset({
-            key: import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '',
+            key: mapsKey,
           });
+          if (isDisposed || !viewerRef.current || viewerRef.current.isDestroyed()) return;
           viewer.scene.primitives.add(tileset);
         } catch (e) {
           console.error('Failed to load Google Photorealistic 3D Tiles', e);
-          // Fallback to a basic globe if key is missing/invalid
-          viewer.scene.globe = new Cesium.Globe(Cesium.Ellipsoid.WGS84);
-          viewer.scene.globe.show = true;
-          setError('Could not load Photorealistic 3D tiles. Displaying base globe as fallback.');
+          if (isDisposed || !viewerRef.current || viewerRef.current.isDestroyed()) return;
+          setError('Could not load Photorealistic 3D tiles (check Google 3D Tiles API + key restrictions). Displaying base globe fallback.');
         }
       };
 
@@ -56,10 +70,14 @@ export default function RealWorldMap({ location, onClose }) {
 
       // Fly to the location
       if (location && location.latitude && location.longitude) {
+        const lat = Number(location.latitude);
+        const lon = Number(location.longitude);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
         const destination = Cesium.Cartesian3.fromDegrees(
-          location.longitude,
-          location.latitude,
-          location.elevation || 1500 // defaults to 1.5km height
+          lon,
+          lat,
+          Number(location.elevation) || 1500 // defaults to 1.5km height
         );
         
         viewer.camera.flyTo({
@@ -77,7 +95,7 @@ export default function RealWorldMap({ location, onClose }) {
           position: destination,
           point: {
             pixelSize: 20,
-            color: Cesium.Color.fromCssColorString('#00f3ff'),
+            color: pinColorForScore(location.score),
             outlineColor: Cesium.Color.WHITE,
             outlineWidth: 3
           },
@@ -93,6 +111,7 @@ export default function RealWorldMap({ location, onClose }) {
       }
 
       return () => {
+        isDisposed = true;
         if (viewerRef.current) {
           viewerRef.current.destroy();
           viewerRef.current = null;
@@ -158,6 +177,23 @@ export default function RealWorldMap({ location, onClose }) {
               <span className="text-gray-400">ELEVATION</span>
               <span className="text-white">{location.elevation || '—'}</span>
             </div>
+
+            {(location.best_spot_name || location.distance_from_optimal_km != null || location.best_spot_distance_km != null) && (
+              <div className="flex justify-between items-center bg-cyan-500/10 border border-cyan-400/30 p-3 rounded">
+                <span className="text-cyan-200">BEST SPOT</span>
+                <span className="text-right text-cyan-100">
+                  {location.best_spot_name || location.name || '—'}
+                  <br />
+                  <span className="text-xs text-cyan-200/80">
+                    {location.best_spot_distance_km != null
+                      ? `${location.best_spot_distance_km} km from optimal`
+                      : location.distance_from_optimal_km != null
+                        ? `${location.distance_from_optimal_km} km from optimal`
+                        : `Score ${location.best_spot_score ?? location.score ?? '—'}`}
+                  </span>
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="mt-auto pt-4 flex flex-col gap-3">
