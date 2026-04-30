@@ -1,7 +1,0 @@
-fastapi
-uvicorn
-requests
-httpx
-python-dotenv
-pydantic
-skyfield
