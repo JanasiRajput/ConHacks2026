@@ -1,4 +1,4 @@
-# SkyLens 3D Backend
+# NightOwl 3D Backend
 
 FastAPI backend for **SkyLens 3D**, an astrophotography planning app that
 helps photographers pick the best time and place to shoot the Milky Way,
