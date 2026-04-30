@@ -14,25 +14,25 @@ FastAPI backend for **Night Owl (SkyLens 3D)** — an astrophotography planning 
 
 ### 🌌 3D Sky Visualization
 
-![3D Sky](./images/3d-sky.png)
+![3D Sky](3d-sky.png)
 
 ---
 
 ### 📊 Visibility Score System
 
-![Visibility Score](./images/visibility-score.png)
+![Visibility Score](visibility-score.png)
 
 ---
 
 ### 🔍 AI Sky Search
 
-![AI Search](./images/ai-search.png)
+![AI Search](ai-search.png)
 
 ---
 
 ### 📍 Location Optimization Results
 
-![Map Results](./images/map-results.png)
+![Map Results](map-results.png)
 
 ---
 
