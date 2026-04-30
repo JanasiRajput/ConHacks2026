@@ -1,0 +1,5 @@
+app/
+main.py
+requirements.txt
+venv/
+skyfield-data/

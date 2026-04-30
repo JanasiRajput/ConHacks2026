@@ -78,3 +78,23 @@ body {
 .glow-text-purple {
   text-shadow: 0 0 15px rgba(161, 0, 255, 0.6);
 }
+
+.slide-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.5) rgba(15, 23, 42, 0.45);
+}
+
+.slide-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.slide-scroll::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.45);
+  border-radius: 999px;
+}
+
+.slide-scroll::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(34, 211, 238, 0.7), rgba(129, 140, 248, 0.7));
+  border-radius: 999px;
+}

@@ -49,6 +49,13 @@ export async function getSky({ latitude, longitude, date, time }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  POST /api/astronomy                                                */
+/* ------------------------------------------------------------------ */
+export async function getAstronomy({ latitude, longitude, date, time }) {
+  return request('/astronomy', { latitude, longitude, date, time });
+}
+
+/* ------------------------------------------------------------------ */
 /*  POST /api/nearby                                                   */
 /* ------------------------------------------------------------------ */
 export async function getNearby({ latitude, longitude, locationName, radiusKm = 150, target = 'milky_way' }) {
