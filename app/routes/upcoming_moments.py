@@ -266,10 +266,10 @@ def _evaluate_slot(
 @router.post(
     "/upcoming-moments",
     response_model=UpcomingMomentsResponse,
-    summary="Upcoming Sky Moments",
+    summary="Upcoming sky moments near you",
     description=(
-        "Combine nearby real places, future dates, and scoring to find upcoming opportunities. "
-        "Best for: 'What good sky-viewing opportunities are coming near me?'"
+        "Combines nearby real places, future dates, and scoring to find saveable upcoming opportunities "
+        "such as Milky Way windows, planet viewing, aurora watch, or star visibility."
     ),
 )
 async def upcoming_moments(body: UpcomingMomentsRequest) -> UpcomingMomentsResponse:

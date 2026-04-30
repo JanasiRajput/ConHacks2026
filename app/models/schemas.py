@@ -62,6 +62,14 @@ class FutureResponse(BaseModel):
     best_time: str
     best_score: int
     best_window: str
+    location: Dict[str, float] = Field(
+        ...,
+        description="Resolved latitude/longitude for this forecast (same for every row in results).",
+    )
+    location_name: str = Field(
+        ...,
+        description="Human-readable place label (client name, reverse geocode, or IP/default).",
+    )
     results: List[Dict[str, Any]]
     recommendation: str
     ai_summary: str
@@ -80,11 +88,21 @@ class NearbyRequest(BaseModel):
 
 
 class NearbyResponse(BaseModel):
-    best_spot: Optional[Dict[str, Any]] = None
+    """Physics-first nearby: optimal sky pin, then scored real places (no duplicate arrays)."""
+
+    current_location_score: Optional[int] = Field(
+        default=None,
+        description="Visibility score at the user's resolved search origin (same target/date).",
+    )
     optimal_coordinates: Optional[Dict[str, Any]] = None
+    best_spot: Optional[Dict[str, Any]] = None
     alternatives: List[Dict[str, Any]] = Field(default_factory=list)
     message: Optional[str] = None
-    note: Optional[str] = None
+    suggestion: Optional[str] = Field(
+        default=None,
+        description="Short guidance comparing optimal sky vs verified places.",
+    )
+    data_sources: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------

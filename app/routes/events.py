@@ -49,10 +49,10 @@ def _build_summary(astronomy: dict, sky_events: dict, aurora: dict) -> str:
 @router.post(
     "/events",
     response_model=EventsResponse,
-    summary="Visible Sky Events",
+    summary="Visible planets, stars, constellations, and sky events",
     description=(
-        "Show what planets, famous stars, constellations, Milky Way, or aurora may be visible "
-        "for a selected date/time. Best for: 'What can I see tonight?'"
+        "Calculates what is visible for a selected location and time, including planets, "
+        "famous stars, constellations, moon, Milky Way visibility, and meteor shower hints when available."
     ),
 )
 def whats_up_tonight(request: EventsRequest) -> EventsResponse:

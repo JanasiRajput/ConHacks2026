@@ -289,77 +289,106 @@ def _route_to_backend(
     if intent == "nearby":
         radius = int(parsed.get("radius_km") or 100)
         date_str = _resolve_date(date_token)
-        candidates = nearby_service.get_nearby_dark_locations(
-            latitude=latitude,
-            longitude=longitude,
-            radius_km=radius,
-            target=parsed["target"],
-        )
-        top = sorted(candidates, key=lambda c: c.get("score", 0), reverse=True)[:5]
-        pin = top[0] if top else None
-        optimal = nearby_service.find_optimal_coordinates(
-            latitude,
-            longitude,
-            float(radius),
-            parsed["target"],
-            max_grid_points=18,
-        )
-        note = None
-        if optimal:
-            nd = nearby_service.min_distance_to_places_km(
-                float(optimal["latitude"]),
-                float(optimal["longitude"]),
-                candidates,
+        time_slot = str(parsed.get("time") or "23:00")
+        requested_radius = max(1, min(radius, 300))
+        expanded_radii = [
+            r for r in nearby_service.NEARBY_RADIUS_STEPS_KM if r >= min(50, requested_radius)
+        ]
+        if requested_radius not in expanded_radii:
+            expanded_radii.insert(0, requested_radius)
+        if not expanded_radii:
+            expanded_radii = [requested_radius]
+
+        optimal_full: dict | None = None
+        radius_used = requested_radius
+        for r in expanded_radii:
+            cand = nearby_service.find_optimal_sky_coordinates(
+                latitude,
+                longitude,
+                float(r),
+                date_str,
+                time_slot,
+                parsed["target"],
+                max_grid_points=nearby_service.NEARBY_MAX_GRID_POINTS,
             )
-            if nd is None or nd > 5.0:
-                note = nearby_service.OPTIMAL_COORD_SAFETY_NOTE
-        optimal_coordinates = None
-        if optimal:
-            optimal_coordinates = {
-                "latitude": optimal["latitude"],
-                "longitude": optimal["longitude"],
-                "score": int(optimal["score"]),
-                "reason": optimal.get(
-                    "reason",
-                    "Best sky visibility based on all factors",
-                ),
-            }
+            radius_used = r
+            optimal_full = dict(cand)
+            if int(cand.get("score", 0)) >= nearby_service.NEARBY_GOOD_OPTIMAL_SCORE:
+                break
+            if r >= 300:
+                break
+
+        current_score = nearby_service.score_point_sync(
+            latitude, longitude, date_str, time_slot, parsed["target"]
+        )
+        current_location_score = int(current_score) if current_score is not None else 0
+
+        scored_places: list = []
+        if optimal_full is not None:
+            inner = nearby_service.inner_radius_near_optimal_from_area(radius_used)
+            scored_places = nearby_service.collect_scored_places_near_optimal(
+                float(optimal_full["latitude"]),
+                float(optimal_full["longitude"]),
+                inner,
+                latitude,
+                longitude,
+                date_str,
+                time_slot,
+                parsed["target"],
+            )
+
+        optimal_coordinates = (
+            nearby_service.public_optimal_coordinates(optimal_full)
+            if optimal_full is not None
+            else None
+        )
+
         best_spot = None
-        if pin:
-            best_spot = {
-                "name": pin.get("name"),
-                "latitude": pin.get("latitude"),
-                "longitude": pin.get("longitude"),
-                "address": pin.get("address"),
-                "maps_url": pin.get("maps_url"),
-                "distance_km": pin.get("distance_km"),
-                "score": int(pin.get("score", 0)),
-                "reason": pin.get("reason"),
-                "navigation": pin.get("navigation"),
-                "source": pin.get("source"),
-            }
-        alternatives_payload = []
-        for alt in top[1:4]:
-            alternatives_payload.append(
-                {
-                    "name": alt.get("name"),
-                    "latitude": alt.get("latitude"),
-                    "longitude": alt.get("longitude"),
-                    "address": alt.get("address"),
-                    "maps_url": alt.get("maps_url"),
-                    "distance_km": alt.get("distance_km"),
-                    "score": int(alt.get("score", 0)),
-                    "reason": alt.get("reason"),
-                    "navigation": alt.get("navigation"),
-                    "source": alt.get("source"),
-                }
+        alternatives_payload: list[dict] = []
+        if optimal_full is not None and scored_places:
+            best_spot = nearby_service.public_best_spot_row(
+                scored_places[0], latitude, longitude, rank_index=0
             )
-        msg = None
-        if not pin and not optimal_coordinates:
-            msg = (
-                "No real nearby places were found for this radius. "
-                "Try increasing radius or searching again."
-            )
+            for i, alt in enumerate(scored_places[1:4], start=1):
+                alternatives_payload.append(
+                    nearby_service.public_best_spot_row(alt, latitude, longitude, rank_index=i)
+                )
+
+        max_cloud = float(optimal_full.get("grid_max_cloud_cover", 0.0)) if optimal_full else 0.0
+        opt_score = int(optimal_full.get("score", 0)) if optimal_full else 0
+        if optimal_full is not None and not best_spot:
+            msg = nearby_service.NO_VERIFIED_PUBLIC_PLACE_MESSAGE
+        elif optimal_full is not None:
+            msg = nearby_service.compose_nearby_sky_message(opt_score, max_cloud)
+        else:
+            msg = None
+
+        suggestion = None
+        if optimal_coordinates:
+            oscore = int(optimal_coordinates.get("score", 0))
+            olat = optimal_coordinates.get("latitude")
+            olon = optimal_coordinates.get("longitude")
+            if olat is not None and olon is not None:
+                dist_km = nearby_service.haversine_km(
+                    latitude, longitude, float(olat), float(olon)
+                )
+            else:
+                dist_km = 0.0
+            if best_spot and best_spot.get("name"):
+                suggestion = (
+                    f'Use {best_spot.get("name")} as the nearest verified public outdoor site near '
+                    "the computed optimal sky point."
+                )
+            elif alternatives_payload:
+                suggestion = (
+                    "Optimal sky coordinates are set; review alternatives or widen the search radius."
+                )
+            elif oscore > current_location_score + 8:
+                suggestion = (
+                    f"Best grid cell is about {dist_km:.0f} km away (score {oscore}). "
+                    "Try a larger radius to pair it with a named access point."
+                )
+
         return "nearby", {
             "date": date_str,
             "location": {
@@ -367,14 +396,13 @@ def _route_to_backend(
                 "latitude": latitude,
                 "longitude": longitude,
             },
-            "radius_km": radius,
-            "best_spot": best_spot,
+            "radius_km": radius_used,
+            "current_location_score": current_location_score,
             "optimal_coordinates": optimal_coordinates,
+            "best_spot": best_spot,
             "alternatives": alternatives_payload,
             "message": msg,
-            "note": note,
-            "candidate_locations": top,
-            "pin_location": pin,
+            "suggestion": suggestion,
         }
 
     if intent == "upcoming_moments":
@@ -467,23 +495,27 @@ def _fallback_answer(parsed: Dict[str, Any], data: Dict[str, Any], route: str) -
         )
 
     if route == "nearby":
-        pin = data.get("best_spot") or data.get("pin_location") or {}
         opt = data.get("optimal_coordinates") or {}
+        pin = data.get("best_spot") or {}
+        alts = data.get("alternatives") or []
         parts: list[str] = []
-        if pin and pin.get("latitude") is not None and pin.get("longitude") is not None:
-            parts.append(
-                f"Best nearby real place within {data.get('radius_km', 100)} km is "
-                f"{pin.get('name', 'a nearby site')} at "
-                f"{float(pin['latitude']):.5f}, {float(pin['longitude']):.5f}."
-            )
         if opt.get("latitude") is not None and opt.get("longitude") is not None:
             parts.append(
-                "Mathematically best sky coordinates in this search disc (grid-scored) are "
+                "Best sky in this search area (grid optimal pin) is at "
                 f"{float(opt['latitude']):.5f}, {float(opt['longitude']):.5f} "
                 f"(score {int(opt.get('score', 0))}/100)."
             )
-        if data.get("note"):
-            parts.append(str(data["note"]))
+        if pin and pin.get("latitude") is not None and pin.get("longitude") is not None:
+            parts.append(
+                f"Best named place near that pin is {pin.get('name', 'a nearby site')} at "
+                f"{float(pin['latitude']):.5f}, {float(pin['longitude']):.5f} "
+                f"(driving directions are from your search origin)."
+            )
+        if alts:
+            names = ", ".join(str(a.get("name") or "site") for a in alts[:4])
+            parts.append(f"Strong real sites from your search origin include: {names}.")
+        if data.get("message"):
+            parts.append(str(data["message"]))
         if parts:
             return " ".join(parts)
         return (
@@ -522,7 +554,7 @@ def _best_pin_line(pin: Optional[Dict[str, Any]]) -> str:
     lat = pin.get("latitude")
     lon = pin.get("longitude")
     score = pin.get("score")
-    dist = pin.get("distance_km")
+    dist = pin.get("distance_from_user_km") or pin.get("distance_km")
     if lat is None or lon is None:
         return ""
     extras = []
@@ -531,7 +563,7 @@ def _best_pin_line(pin: Optional[Dict[str, Any]]) -> str:
     if dist is not None:
         extras.append(f"{dist} km away")
     extra_txt = f" ({', '.join(extras)})" if extras else ""
-    return f"Best nearby pin: {name} at {lat:.5f}, {lon:.5f}{extra_txt}."
+    return f"Best real site near the optimal sky pin: {name} at {lat:.5f}, {lon:.5f}{extra_txt}."
 
 
 def _attach_pin_if_requested(
@@ -567,10 +599,10 @@ def _attach_pin_if_requested(
 @router.post(
     "/ai-search",
     response_model=AISearchResponse,
-    summary="SkyLens AI Assistant",
+    summary="SkyLens AI assistant",
     description=(
-        "Natural-language assistant that parses user intent, routes to the correct backend logic, "
-        "and returns beginner-friendly guidance."
+        "Parses natural-language questions, routes them to the correct SkyLens logic, and explains "
+        "results in beginner-friendly language with optional pin and 3D visualization instructions."
     ),
 )
 def ai_search(request: AISearchRequest, http_request: Request) -> AISearchResponse:
@@ -610,7 +642,7 @@ def ai_search(request: AISearchRequest, http_request: Request) -> AISearchRespon
             moments = data.get("moments") or []
             score = int((moments[0].get("score") if moments else 55) or 55)
         elif route == "nearby":
-            nb_pin = data.get("best_spot") or data.get("pin_location") or {}
+            nb_pin = data.get("best_spot") or {}
             opt = data.get("optimal_coordinates") or {}
             score = int(
                 nb_pin.get("score")
@@ -632,7 +664,7 @@ def ai_search(request: AISearchRequest, http_request: Request) -> AISearchRespon
             ai_source = "fallback"
             answer = _fallback_answer(parsed, data, route)
 
-        pin_for_line = pin_attachment or data.get("best_spot") or data.get("pin_location")
+        pin_for_line = pin_attachment or data.get("best_spot")
         pin_line = _best_pin_line(pin_for_line if isinstance(pin_for_line, dict) else None)
         if pin_line and pin_line not in answer:
             answer = f"{answer} {pin_line}".strip()
@@ -642,43 +674,38 @@ def ai_search(request: AISearchRequest, http_request: Request) -> AISearchRespon
                 f"within about {parsed.get('radius_km', 100)} km right now."
             ).strip()
 
+        bp_row = data.get("best_pin_location") or data.get("best_spot")
+        opt_row = data.get("optimal_coordinates") or {}
+        if bp_row:
+            best_location_payload = {
+                "name": bp_row.get("name"),
+                "latitude": bp_row.get("latitude"),
+                "longitude": bp_row.get("longitude"),
+                "distance_km": bp_row.get("distance_km"),
+                "maps_url": (
+                    f"https://maps.google.com/?q={bp_row.get('latitude')},{bp_row.get('longitude')}"
+                    if bp_row.get("latitude") is not None and bp_row.get("longitude") is not None
+                    else None
+                ),
+            }
+        elif opt_row.get("latitude") is not None and opt_row.get("longitude") is not None:
+            best_location_payload = {
+                "name": "Optimal sky coordinates",
+                "latitude": opt_row.get("latitude"),
+                "longitude": opt_row.get("longitude"),
+                "distance_km": opt_row.get("distance_km"),
+                "maps_url": opt_row.get("maps_url")
+                or f"https://maps.google.com/?q={opt_row['latitude']},{opt_row['longitude']}",
+            }
+        else:
+            best_location_payload = None
+
         structured_answer = {
             "answer": answer,
             "short_answer": answer.split(".")[0].strip() + ".",
             "recommended_action": _fallback_answer(parsed, data, route),
             "best_time": data.get("best_time") or data.get("time"),
-            "best_location": (
-                {
-                    "name": (data.get("best_pin_location") or data.get("best_spot") or data.get("pin_location") or {}).get("name"),
-                    "latitude": (data.get("best_pin_location") or data.get("best_spot") or data.get("pin_location") or {}).get("latitude"),
-                    "longitude": (data.get("best_pin_location") or data.get("best_spot") or data.get("pin_location") or {}).get("longitude"),
-                    "distance_km": (data.get("best_pin_location") or data.get("best_spot") or data.get("pin_location") or {}).get("distance_km"),
-                    "maps_url": (
-                        f"https://maps.google.com/?q={((data.get('best_pin_location') or data.get('best_spot') or data.get('pin_location') or {}).get('latitude'))},"
-                        f"{((data.get('best_pin_location') or data.get('best_spot') or data.get('pin_location') or {}).get('longitude'))}"
-                        if ((data.get("best_pin_location") or data.get("best_spot") or data.get("pin_location") or {}).get("latitude") is not None
-                            and (data.get("best_pin_location") or data.get("best_spot") or data.get("pin_location") or {}).get("longitude") is not None)
-                        else None
-                    ),
-                }
-                if (data.get("best_pin_location") or data.get("best_spot") or data.get("pin_location"))
-                else (
-                    {
-                        "name": "Optimal sky coordinates",
-                        "latitude": data.get("optimal_coordinates", {}).get("latitude"),
-                        "longitude": data.get("optimal_coordinates", {}).get("longitude"),
-                        "distance_km": None,
-                        "maps_url": (
-                            f"https://maps.google.com/?q={data['optimal_coordinates']['latitude']},{data['optimal_coordinates']['longitude']}"
-                            if data.get("optimal_coordinates", {}).get("latitude") is not None
-                            and data.get("optimal_coordinates", {}).get("longitude") is not None
-                            else None
-                        ),
-                    }
-                    if data.get("optimal_coordinates")
-                    else None
-                )
-            ),
+            "best_location": best_location_payload,
             "visible_objects": (
                 (data.get("moments") or [{}])[0].get("visible_objects")
                 if route == "upcoming_moments"

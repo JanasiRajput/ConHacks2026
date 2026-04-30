@@ -56,10 +56,11 @@ def _cache_key(latitude: float, longitude: float, request: PlanRequest) -> tuple
 @router.post(
     "/plan",
     response_model=PlanResponse,
-    summary="Live Sky Planner",
+    summary="Live sky planner for one location and time",
     description=(
-        "Analyze one selected location, date, time, and target using live/current data "
-        "where available. Best for: 'What are conditions like here at this time?'"
+        "Scores one selected location, date, time, and target using live weather, calculated "
+        "astronomy, estimated light pollution, air quality, and aurora data. Returns visibility "
+        "score, what is visible, camera settings, and AI insight."
     ),
 )
 async def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:

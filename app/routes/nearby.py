@@ -1,34 +1,65 @@
-"""POST /api/nearby - nearby real-location dark-sky finder."""
+"""POST /api/nearby — physics-first optimal sky, then real places near that pin only."""
 
 from __future__ import annotations
+
+import asyncio
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
 
 from app.models.schemas import NearbyRequest, NearbyResponse
-from app.services import (
-    location_service,
-    nearby_service,
-)
+from app.services import location_service, nearby_service
 from app.services.cache import TTLCache
+from app.services.data_sources import build_data_sources
 
 
 router = APIRouter(tags=["nearby"])
 
-# Nearby is the most expensive endpoint (10+ candidate points, each
-# hitting 3 upstreams). Caching keeps the second visit instant.
 _nearby_cache: TTLCache = TTLCache(ttl_seconds=180.0, max_entries=64)
-_RADIUS_STEPS = (50, 100, 200, 300)
-_GOOD_SCORE_THRESHOLD = 70
-_NEAR_REAL_PLACE_KM = 5.0
+
+
+def _suggestion_text(
+    optimal: dict | None,
+    best: dict | None,
+    current_score: int,
+    alternatives: list,
+    user_lat: float,
+    user_lon: float,
+) -> str | None:
+    if not optimal:
+        return None
+    oscore = int(optimal.get("score", 0))
+    olat, olon = optimal.get("latitude"), optimal.get("longitude")
+    if olat is not None and olon is not None:
+        dist_km = nearby_service.haversine_km(user_lat, user_lon, float(olat), float(olon))
+    else:
+        dist_km = 0.0
+    if best and best.get("name"):
+        return (
+            f'Use {best.get("name")} as the nearest verified public outdoor site near the '
+            "computed optimal sky point."
+        )
+    if alternatives:
+        return (
+            "Optimal sky coordinates are set, but no top-ranked verified site was selected; "
+            "see alternatives or widen the search."
+        )
+    if oscore > int(current_score) + 8:
+        return (
+            f"The best grid cell is about {dist_km:.0f} km away (score {oscore}). "
+            "Try a larger radius to pair it with a named access point."
+        )
+    return f"Optimal sky score in this disc: {oscore} (about {dist_km:.0f} km from your origin)."
 
 
 @router.post(
     "/nearby",
     response_model=NearbyResponse,
-    summary="Nearby Real Place Finder",
+    summary="Physics-first optimal sky coordinates, then real places near that pin",
     description=(
-        "Best real place (Google Places / OSM) plus mathematically optimal coordinates from a grid "
-        "search within your radius. Best for: 'Where should I go?' and 'What's the best sky in this area?'"
+        "Computes the best sky-viewing coordinates within the radius using a multi-point grid, "
+        "weather, moon, darkness, air quality, light pollution, and aurora. Then finds real "
+        "outdoor places (park / campground / tourist_attraction) near that optimal pin only."
     ),
 )
 async def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyResponse:
@@ -50,7 +81,8 @@ async def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyRe
                 latitude, longitude, _label = google_loc
 
         cache_key = (
-            round(latitude, 2),  # ~1km bucket - nearby results don't change rapidly
+            "v3",
+            round(latitude, 2),
             round(longitude, 2),
             int(request.radius_km),
             request.target,
@@ -59,105 +91,133 @@ async def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyRe
         if cached is not None:
             return cached
 
+        date = datetime.utcnow().strftime("%Y-%m-%d")
+        time_slot = "23:00"
+
         requested_radius = max(1, min(int(request.radius_km), 300))
-        expanded_radii = [r for r in _RADIUS_STEPS if r >= min(50, requested_radius)]
+        expanded_radii = [
+            r for r in nearby_service.NEARBY_RADIUS_STEPS_KM if r >= min(50, requested_radius)
+        ]
         if requested_radius not in expanded_radii:
             expanded_radii.insert(0, requested_radius)
+        if not expanded_radii:
+            expanded_radii = [requested_radius]
 
-        best_scored: list[dict] = []
+        optimal_full: dict | None = None
         radius_used = requested_radius
         for radius in expanded_radii:
-            best_scored = await nearby_service.get_nearby_dark_locations_async(
-                latitude, longitude, radius, request.target, max_places=10
+            cand = await nearby_service.find_optimal_sky_coordinates_async(
+                latitude,
+                longitude,
+                float(radius),
+                date,
+                time_slot,
+                request.target,
+                max_grid_points=nearby_service.NEARBY_MAX_GRID_POINTS,
             )
             radius_used = radius
-            if not best_scored:
-                continue
-            if int(best_scored[0].get("score", 0)) >= _GOOD_SCORE_THRESHOLD:
+            optimal_full = cand
+            if int(cand.get("score", 0)) >= nearby_service.NEARBY_GOOD_OPTIMAL_SCORE:
                 break
             if radius >= 300:
                 break
 
-        optimal_raw = await nearby_service.find_optimal_coordinates_async(
-            latitude,
-            longitude,
-            float(radius_used),
-            request.target,
-            max_grid_points=18,
+        scored_places: list[dict] = []
+        user_score_coro = nearby_service.score_point_async(
+            latitude, longitude, date, time_slot, request.target
         )
-        optimal_coordinates = None
-        if optimal_raw:
-            optimal_coordinates = {
-                "latitude": optimal_raw["latitude"],
-                "longitude": optimal_raw["longitude"],
-                "score": optimal_raw["score"],
-                "reason": optimal_raw.get(
-                    "reason",
-                    "Best sky visibility based on all factors",
-                ),
-            }
+        if optimal_full:
+            o_lat = float(optimal_full["latitude"])
+            o_lon = float(optimal_full["longitude"])
+            inner = nearby_service.inner_radius_near_optimal_from_area(radius_used)
+            places_coro = nearby_service.collect_scored_places_near_optimal_async(
+                o_lat,
+                o_lon,
+                inner,
+                latitude,
+                longitude,
+                date,
+                time_slot,
+                request.target,
+            )
+            current_score, scored_places = await asyncio.gather(user_score_coro, places_coro)
+        else:
+            current_score = await user_score_coro
+            scored_places = []
 
-        note: str | None = None
-        if optimal_coordinates:
-            olat = float(optimal_coordinates["latitude"])
-            olon = float(optimal_coordinates["longitude"])
-            nearest_km = nearby_service.min_distance_to_places_km(olat, olon, best_scored)
-            if nearest_km is None or nearest_km > _NEAR_REAL_PLACE_KM:
-                note = nearby_service.OPTIMAL_COORD_SAFETY_NOTE
+        current_location_score = int(current_score) if current_score is not None else 0
 
-        if not best_scored:
+        optimal_coordinates = (
+            nearby_service.public_optimal_coordinates(optimal_full)
+            if optimal_full
+            else None
+        )
+
+        best_spot: dict | None = None
+        alternatives: list[dict] = []
+        if optimal_full and scored_places:
+            best_spot = nearby_service.public_best_spot_row(
+                scored_places[0], latitude, longitude, rank_index=0
+            )
+            for i, row in enumerate(scored_places[1:4], start=1):
+                alternatives.append(
+                    nearby_service.public_best_spot_row(row, latitude, longitude, rank_index=i)
+                )
+
+        max_cloud = float(optimal_full.get("grid_max_cloud_cover", 0.0)) if optimal_full else 0.0
+        opt_score = int(optimal_full.get("score", 0)) if optimal_full else 0
+
+        if not best_spot and optimal_full:
+            message = nearby_service.NO_VERIFIED_PUBLIC_PLACE_MESSAGE
+        elif optimal_full:
+            message = nearby_service.compose_nearby_sky_message(opt_score, max_cloud)
+        else:
+            message = "No nearby sky data could be built for this radius. Try again later or widen the search."
+
+        if optimal_coordinates is None and not best_spot and not alternatives:
             response = NearbyResponse(
+                current_location_score=current_location_score or None,
+                optimal_coordinates=None,
                 best_spot=None,
-                optimal_coordinates=optimal_coordinates,
                 alternatives=[],
-                message=(
-                    "No real nearby places were found. Try again with a larger radius."
-                    if optimal_coordinates is None
-                    else None
+                message=message,
+                suggestion=None,
+                data_sources=build_data_sources(
+                    nearby_status="empty",
+                    nearby_source="Google Places API / OSM",
                 ),
-                note=note,
             )
             _nearby_cache.set(cache_key, response)
             return response
 
-        best = best_scored[0]
-        best_spot = {
-            "name": best.get("name"),
-            "latitude": best.get("latitude"),
-            "longitude": best.get("longitude"),
-            "address": best.get("address"),
-            "maps_url": best.get("maps_url")
-            or f"https://www.google.com/maps/search/?api=1&query={best.get('latitude')},{best.get('longitude')}",
-            "distance_km": best.get("distance_km"),
-            "score": int(best.get("score", 0)),
-            "reason": best.get("reason"),
-            "navigation": best.get("navigation") or {"route_available": False},
-            "source": best.get("source"),
-        }
-        alternatives = []
-        for alt in best_scored[1:4]:
-            alternatives.append(
-                {
-                    "name": alt.get("name"),
-                    "latitude": alt.get("latitude"),
-                    "longitude": alt.get("longitude"),
-                    "address": alt.get("address"),
-                    "maps_url": alt.get("maps_url")
-                    or f"https://www.google.com/maps/search/?api=1&query={alt.get('latitude')},{alt.get('longitude')}",
-                    "distance_km": alt.get("distance_km"),
-                    "score": int(alt.get("score", 0)),
-                    "reason": alt.get("reason"),
-                    "navigation": alt.get("navigation") or {"route_available": False},
-                    "source": alt.get("source"),
-                }
-            )
+        suggestion = _suggestion_text(
+            optimal_coordinates,
+            best_spot,
+            current_location_score,
+            alternatives,
+            latitude,
+            longitude,
+        )
+
+        nearby_src = "Google Places API"
+        if best_spot and best_spot.get("source") == "OpenStreetMap Overpass":
+            nearby_src = "OpenStreetMap Overpass"
+        elif scored_places and scored_places[0].get("source") == "OpenStreetMap Overpass":
+            nearby_src = "OpenStreetMap Overpass"
+
+        data_sources = build_data_sources(
+            nearby_status="live" if (best_spot or alternatives) else "live_or_empty",
+            nearby_source=nearby_src,
+        )
 
         response = NearbyResponse(
-            best_spot=best_spot,
+            current_location_score=current_location_score,
             optimal_coordinates=optimal_coordinates,
+            best_spot=best_spot,
             alternatives=alternatives,
-            message=None,
-            note=note,
+            message=message,
+            suggestion=suggestion,
+            data_sources=data_sources,
         )
         _nearby_cache.set(cache_key, response)
         return response
