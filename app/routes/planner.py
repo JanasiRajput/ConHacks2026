@@ -17,18 +17,10 @@ from app.services import (
     sky_events_service,
     weather_service,
 )
-from app.services.cache import TTLCache
 from app.services.parallel import gather
 
 
 router = APIRouter(tags=["planner"])
-
-
-# Memoise full /plan responses for ~60s. Keys round coords to ~110m so
-# tiny GPS jitter doesn't blow the cache, and capture every other input
-# verbatim. This is the difference between "<200ms time-slider scrub"
-# and "wait 5s every drag".
-_plan_cache: TTLCache = TTLCache(ttl_seconds=60.0, max_entries=256)
 
 
 def _recommendation_for(score: int) -> str:
@@ -41,14 +33,6 @@ def _recommendation_for(score: int) -> str:
     return "Poor conditions - consider rescheduling."
 
 
-def _cache_key(latitude: float, longitude: float, request: PlanRequest) -> tuple:
-    return (
-        round(latitude, 3),
-        round(longitude, 3),
-        request.date,
-        request.time,
-        request.target,
-    )
 
 
 @router.post("/plan", response_model=PlanResponse)
@@ -60,14 +44,8 @@ def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
             client_ip=client_ip,
         )
 
-        cache_key = _cache_key(latitude, longitude, request)
-        cached = _plan_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
         # Fan out the four independent slow upstreams in parallel. Total
-        # wall time becomes max(t1..t4) instead of sum(t1..t4); on a
-        # cold cache that's typically 2-3x faster.
+        # wall time becomes max(t1..t4) instead of sum(t1..t4).
         upstream = gather({
             "weather": lambda: weather_service.get_weather_data(
                 latitude, longitude, request.date, request.time
@@ -169,7 +147,6 @@ def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
             ai_insight=ai_insight,
             breakdown=breakdown,
         )
-        _plan_cache.set(cache_key, response)
         return response
     except HTTPException:
         raise

@@ -26,8 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
-import time
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import requests
 
@@ -52,19 +51,10 @@ except ValueError:
 
 _IP_LOOKUP_URL = os.environ.get("IP_LOCATION_URL", "https://ipapi.co/json/")
 _IP_LOOKUP_TIMEOUT = float(os.environ.get("IP_LOCATION_TIMEOUT", "3.0"))
-_IP_CACHE_TTL_SECONDS = 60 * 60  # 1 hour
-_ip_cache: Dict[str, Tuple[float, Optional[Tuple[float, float, str]]]] = {}
 
 
 def _ip_lookup(client_ip: Optional[str] = None) -> Optional[Tuple[float, float, str]]:
     """Resolve client IP -> (lat, lon, label). Returns None on failure."""
-    cache_key = client_ip or "self"
-    cached = _ip_cache.get(cache_key)
-    if cached is not None:
-        ts, value = cached
-        if time.time() - ts < _IP_CACHE_TTL_SECONDS:
-            return value
-
     try:
         url = _IP_LOOKUP_URL
         if client_ip:
@@ -81,25 +71,20 @@ def _ip_lookup(client_ip: Optional[str] = None) -> Optional[Tuple[float, float, 
         data = resp.json() or {}
 
         if data.get("error") or data.get("reserved"):
-            _ip_cache[cache_key] = (time.time(), None)
             return None
 
         lat = data.get("latitude")
         lon = data.get("longitude")
         if lat is None or lon is None:
-            _ip_cache[cache_key] = (time.time(), None)
             return None
 
         city = data.get("city")
         country = data.get("country_name") or data.get("country")
         parts = [p for p in (city, country) if p]
         label = ", ".join(parts) if parts else "Detected from IP"
-        result = (float(lat), float(lon), label)
-        _ip_cache[cache_key] = (time.time(), result)
-        return result
+        return (float(lat), float(lon), label)
     except Exception as exc:  # noqa: BLE001
         logger.debug("IP geolocation failed: %s", exc)
-        _ip_cache[cache_key] = (time.time(), None)
         return None
 
 

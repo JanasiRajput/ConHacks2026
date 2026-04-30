@@ -18,7 +18,6 @@ from app.services import (
     scoring_service,
     weather_service,
 )
-from app.services.cache import TTLCache
 from app.services.parallel import gather
 from app.routes.planner import _recommendation_for
 
@@ -31,11 +30,6 @@ router = APIRouter(tags=["future"])
 # darkness/moon position barely shift across them - the score difference
 # was rarely meaningful and tripled our upstream load.
 _NIGHT_TIME = "00:00"
-
-# Scope: identical (rounded coords, target, days) request -> same answer
-# for ~2 minutes. Smooths out repeated calls from BestNights as the user
-# drags the time slider on the main /plan endpoint.
-_future_cache: TTLCache = TTLCache(ttl_seconds=120.0, max_entries=128)
 
 
 def _evaluate_day(
@@ -94,16 +88,6 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
         except (TypeError, ValueError):
             days = 7
 
-        cache_key = (
-            round(latitude, 3),
-            round(longitude, 3),
-            request.target,
-            days,
-        )
-        cached = _future_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
         start = datetime.utcnow().date()
         date_strs = [
             (start + timedelta(days=offset)).strftime("%Y-%m-%d")
@@ -156,7 +140,6 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
             recommendation=_recommendation_for(best["score"]),
             ai_summary=ai_explanation_service.generate_future_summary(best),
         )
-        _future_cache.set(cache_key, response)
         return response
     except HTTPException:
         raise

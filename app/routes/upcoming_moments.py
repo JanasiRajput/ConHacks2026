@@ -29,7 +29,6 @@ from app.services import (
     scoring_service,
     weather_service,
 )
-from app.services.cache import TTLCache
 from app.services.parallel import gather
 
 logger = logging.getLogger(__name__)
@@ -57,7 +56,6 @@ _CHUNK_SIZE = 8
 _MIN_SCORE = 50
 _MAX_SUN_ALT_FOR_MOMENT = -5.0  # reject slots that are still too bright
 _SOFT_TIME_BUDGET_SECONDS = 24.0
-_UPCOMING_CACHE: TTLCache = TTLCache(ttl_seconds=120.0, max_entries=128)
 
 _NIGHT_SLOT_TIMES: Tuple[Tuple[int, str], ...] = (
     (0, "21:00"),
@@ -280,16 +278,6 @@ def upcoming_moments(body: UpcomingMomentsRequest) -> UpcomingMomentsResponse:
 
         radius = max(1, min(radius, 300))
         days = max(1, min(days, 7))
-        cache_key = (
-            round(body.latitude, 3),
-            round(body.longitude, 3),
-            radius,
-            days,
-        )
-        cached = _UPCOMING_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
-
         places = nearby_service.list_real_named_places(
             body.latitude,
             body.longitude,
@@ -343,7 +331,6 @@ def upcoming_moments(body: UpcomingMomentsRequest) -> UpcomingMomentsResponse:
             moments=moments,
             message=_PARTIAL_MOMENTS_MSG if timed_out else None,
         )
-        _UPCOMING_CACHE.set(cache_key, response)
         return response
     except HTTPException:
         raise
