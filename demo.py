@@ -120,32 +120,14 @@ def main(base: str) -> int:
         "latitude": KITCHENER[0], "longitude": KITCHENER[1],
         "radius_km": 200, "target": "milky_way",
     })
-    if nearby.get("current_location_score") is not None:
-        show("origin score", nearby["current_location_score"])
-    opt = nearby.get("optimal_coordinates")
-    if opt:
-        show(
-            "optimal sky",
-            f"{opt.get('latitude')}, {opt.get('longitude')}  score={opt.get('score')}  "
-            f"bearing={opt.get('bearing')}  {opt.get('distance_km')} km from origin",
-        )
-    best = nearby.get("best_spot")
-    if best:
-        dk = best.get("distance_km")
-        show(
-            "best real near optimal",
-            f"{best.get('name')}  score={best.get('score')}  {dk} km from search origin",
-        )
-    if nearby.get("suggestion"):
-        show("suggestion", nearby["suggestion"])
-    section("Alternatives (near optimal pin)")
-    for loc in (nearby.get("alternatives") or [])[:3]:
+    show("current location score", nearby["current_location_score"])
+    section("Top recommendations")
+    locations = nearby.get("best_locations") or nearby.get("recommended_locations") or []
+    for loc in locations[:3]:
         name = loc.get("name") or f"{loc['latitude']:.3f}, {loc['longitude']:.3f}"
         bortle = loc.get("bortle_class", loc.get("estimated_bortle_class", "?"))
-        dk = float(loc.get("distance_km", 0) or 0)
-        print(f"    {name:<40} {dk:>5.1f} km from origin   Bortle {bortle}   score {loc['score']}")
-    if nearby.get("message"):
-        show("message", nearby["message"])
+        print(f"    {name:<45} {loc['distance_km']:>6.1f} km   Bortle {bortle}   score {loc['score']}")
+    show("recommendation", nearby["recommendation"])
 
     banner("3D sky data  -  POST /api/sky")
     sky = post(base, "/api/sky", {

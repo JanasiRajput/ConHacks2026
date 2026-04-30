@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from fastapi import APIRouter, HTTPException, Request
 
 from app.models.schemas import PlanRequest, PlanResponse
@@ -13,14 +12,13 @@ from app.services import (
     aurora_service,
     light_pollution_service,
     location_service,
-    nearby_service,
     observation_window_service,
     scoring_service,
     sky_events_service,
     weather_service,
 )
-from app.services.data_sources import build_data_sources
 from app.services.cache import TTLCache
+from app.services.parallel import gather
 
 
 router = APIRouter(tags=["planner"])
@@ -53,17 +51,8 @@ def _cache_key(latitude: float, longitude: float, request: PlanRequest) -> tuple
     )
 
 
-@router.post(
-    "/plan",
-    response_model=PlanResponse,
-    summary="Live sky planner for one location and time",
-    description=(
-        "Scores one selected location, date, time, and target using live weather, calculated "
-        "astronomy, estimated light pollution, air quality, and aurora data. Returns visibility "
-        "score, what is visible, camera settings, and AI insight."
-    ),
-)
-async def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
+@router.post("/plan", response_model=PlanResponse)
+def create_plan(request: PlanRequest, http_request: Request) -> PlanResponse:
     try:
         client_ip = http_request.client.host if http_request.client else None
         latitude, longitude, location_name = location_service.resolve_location(
@@ -76,32 +65,31 @@ async def create_plan(request: PlanRequest, http_request: Request) -> PlanRespon
         if cached is not None:
             return cached
 
-        weather_f = asyncio.to_thread(
-            weather_service.get_weather_data, latitude, longitude, request.date, request.time
+        # Fan out the four independent slow upstreams in parallel. Total
+        # wall time becomes max(t1..t4) instead of sum(t1..t4); on a
+        # cold cache that's typically 2-3x faster.
+        upstream = gather({
+            "weather": lambda: weather_service.get_weather_data(
+                latitude, longitude, request.date, request.time
+            ),
+            "light_pollution": lambda: light_pollution_service.get_light_pollution_data(
+                latitude, longitude
+            ),
+            "aurora": lambda: aurora_service.get_aurora_data(latitude, longitude),
+            "air_quality": lambda: air_quality_service.get_air_quality(
+                latitude, longitude, request.date, request.time
+            ),
+        })
+        weather = upstream["weather"]
+        light_pollution = upstream["light_pollution"]
+        aurora = upstream["aurora"]
+        air_quality = upstream["air_quality"]
+
+        # Astronomy is a local Skyfield computation - fast, no need to
+        # parallelise.
+        astronomy = astronomy_service.get_astronomy_data(
+            latitude, longitude, request.date, request.time
         )
-        light_f = asyncio.to_thread(
-            light_pollution_service.get_light_pollution_data, latitude, longitude
-        )
-        aurora_f = asyncio.to_thread(aurora_service.get_aurora_data, latitude, longitude)
-        aqi_f = asyncio.to_thread(
-            air_quality_service.get_air_quality, latitude, longitude, request.date, request.time
-        )
-        astronomy_f = asyncio.to_thread(
-            astronomy_service.get_astronomy_data, latitude, longitude, request.date, request.time
-        )
-        weather, light_pollution, aurora, air_quality, astronomy = await asyncio.gather(
-            weather_f, light_f, aurora_f, aqi_f, astronomy_f, return_exceptions=True
-        )
-        if isinstance(weather, Exception):
-            weather = weather_service.get_weather_data(latitude, longitude, request.date, request.time)
-        if isinstance(light_pollution, Exception):
-            light_pollution = light_pollution_service.get_light_pollution_data(latitude, longitude)
-        if isinstance(aurora, Exception):
-            aurora = aurora_service.get_aurora_data(latitude, longitude)
-        if isinstance(air_quality, Exception):
-            air_quality = air_quality_service.get_air_quality(latitude, longitude, request.date, request.time)
-        if isinstance(astronomy, Exception):
-            astronomy = astronomy_service.get_astronomy_data(latitude, longitude, request.date, request.time)
 
         score, breakdown = scoring_service.calculate_score(
             weather, astronomy, light_pollution, aurora, request.target
@@ -110,25 +98,20 @@ async def create_plan(request: PlanRequest, http_request: Request) -> PlanRespon
         # Sky events + best window can also run together. Both are CPU
         # bound (Skyfield) so threading still helps a little, but mostly
         # the AI summary is what we're parallelising the next stage with.
-        sky_events_f = asyncio.to_thread(
-            sky_events_service.get_sky_events,
-            astronomy=astronomy,
-            date=request.date,
-            latitude=latitude,
-            longitude=longitude,
-            time=request.time,
-        )
-        best_window_f = asyncio.to_thread(
-            observation_window_service.compute_best_window,
-            latitude, longitude, request.date, request.target
-        )
-        sky_events, best_window = await asyncio.gather(
-            sky_events_f, best_window_f, return_exceptions=True
-        )
-        if isinstance(sky_events, Exception):
-            sky_events = {}
-        if isinstance(best_window, Exception):
-            best_window = None
+        derived = gather({
+            "sky_events": lambda: sky_events_service.get_sky_events(
+                astronomy=astronomy,
+                date=request.date,
+                latitude=latitude,
+                longitude=longitude,
+                time=request.time,
+            ),
+            "best_window": lambda: observation_window_service.compute_best_window(
+                latitude, longitude, request.date, request.target
+            ),
+        })
+        sky_events = derived["sky_events"] or {}
+        best_window = derived["best_window"]
 
         best_window_str = (
             f"{best_window['start']} - {best_window['end']} ({best_window['reason']})"
@@ -137,33 +120,8 @@ async def create_plan(request: PlanRequest, http_request: Request) -> PlanRespon
         )
 
         camera_settings = scoring_service.get_camera_settings(
-            request.target,
-            score,
-            light_pollution=light_pollution,
-            astronomy=astronomy,
-            weather=weather,
+            request.target, score, light_pollution=light_pollution, astronomy=astronomy
         )
-        best_nearby_spot = None
-        try:
-            nearby_ranked = nearby_service.get_nearby_dark_locations(
-                latitude, longitude, 50, request.target
-            )
-            if nearby_ranked:
-                top = nearby_ranked[0]
-                best_nearby_spot = {
-                    "name": top.get("name"),
-                    "latitude": top.get("latitude"),
-                    "longitude": top.get("longitude"),
-                    "address": top.get("address"),
-                    "maps_url": top.get("maps_url"),
-                    "distance_km": top.get("distance_km"),
-                    "score": top.get("score"),
-                    "reason": top.get("reason"),
-                    "navigation": top.get("navigation"),
-                    "source": top.get("source"),
-                }
-        except Exception:
-            best_nearby_spot = None
 
         # Build the flat structured payload Gemini reasons over for the
         # human-readable explanation + 3D visual weights. Single Gemini
@@ -197,7 +155,6 @@ async def create_plan(request: PlanRequest, http_request: Request) -> PlanRespon
             best_window_detail=best_window,
             target=request.target,
             location_name=location_name,
-            location={"latitude": latitude, "longitude": longitude},
             date=request.date,
             time=request.time,
             weather=weather,
@@ -210,13 +167,6 @@ async def create_plan(request: PlanRequest, http_request: Request) -> PlanRespon
             recommendation=_recommendation_for(score),
             ai_summary=ai_summary,
             ai_insight=ai_insight,
-            best_nearby_spot=best_nearby_spot,
-            data_sources=build_data_sources(
-                weather_status=("fallback" if weather.get("source") == "fallback" else "live"),
-                aurora_status=("fallback" if aurora.get("source") == "fallback" else "live"),
-                nearby_status="not_used",
-                ai_status=("fallback" if ai_insight.get("source") == "fallback" else "live"),
-            ),
             breakdown=breakdown,
         )
         _plan_cache.set(cache_key, response)

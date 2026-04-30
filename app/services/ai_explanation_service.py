@@ -284,8 +284,6 @@ _SKY_INSIGHT_SYSTEM_PROMPT = (
     "6. Provide 3-5 entries in `factors`, each with the actual condition "
     "   that helped or hurt tonight (clouds, moon, light pollution, etc.).\n"
     "7. Do NOT invent data; only reason from the JSON the user gives you."
-    "8. Be tolerant to beginner phrasing, slang, and short forms like 'tn', "
-    "   'best spot', 'jupiter visible', and simple multilingual wording."
 )
 
 _SKY_INSIGHT_OUTPUT_SHAPE = (
@@ -298,9 +296,6 @@ _SKY_INSIGHT_OUTPUT_SHAPE = (
     '"stars_intensity":0.0,"milky_way_visibility":0.0,'
     '"moon_brightness":0.0,"sky_darkness":0.0'
     "},"
-    '"visual_instructions":{"sky_darkness":0.0,"star_intensity":0.0,'
-    '"milky_way_opacity":0.0,"moon_glow":0.0,"highlight_direction":"N",'
-    '"highlight_objects":[]},'
     '"factors":[{"name":"<thing>","impact":"<one sentence>"}]'
     "}"
 )
@@ -343,7 +338,6 @@ def _coerce_unit(value: Any, default: float = 0.5) -> float:
 def _normalise_insight(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Defensively coerce whatever Gemini gives us into our contract."""
     visual = raw.get("visual") or {}
-    visual_instructions = raw.get("visual_instructions") or {}
     factors_raw = raw.get("factors") or []
 
     factors: list = []
@@ -364,19 +358,6 @@ def _normalise_insight(raw: Dict[str, Any]) -> Dict[str, Any]:
     if direction not in {"N", "NE", "E", "SE", "S", "SW", "W", "NW"}:
         direction = "S"
 
-    stars_intensity = _coerce_unit(
-        visual.get("stars_intensity", visual_instructions.get("star_intensity")), 0.5
-    )
-    milky_way_visibility = _coerce_unit(
-        visual.get("milky_way_visibility", visual_instructions.get("milky_way_opacity")), 0.4
-    )
-    moon_brightness = _coerce_unit(
-        visual.get("moon_brightness", visual_instructions.get("moon_glow")), 0.4
-    )
-    sky_darkness = _coerce_unit(
-        visual.get("sky_darkness", visual_instructions.get("sky_darkness")), 0.5
-    )
-
     return {
         "explanation": str(raw.get("explanation") or "").strip()
             or "Sky conditions are moderate for viewing.",
@@ -385,18 +366,10 @@ def _normalise_insight(raw: Dict[str, Any]) -> Dict[str, Any]:
         "visibility": visibility,
         "direction_hint": direction,
         "visual": {
-            "stars_intensity": stars_intensity,
-            "milky_way_visibility": milky_way_visibility,
-            "moon_brightness": moon_brightness,
-            "sky_darkness": sky_darkness,
-        },
-        "visual_instructions": {
-            "sky_darkness": sky_darkness,
-            "star_intensity": stars_intensity,
-            "milky_way_opacity": milky_way_visibility,
-            "moon_glow": moon_brightness,
-            "highlight_direction": direction,
-            "highlight_objects": [f.get("name") for f in factors[:4]],
+            "stars_intensity": _coerce_unit(visual.get("stars_intensity"), 0.5),
+            "milky_way_visibility": _coerce_unit(visual.get("milky_way_visibility"), 0.4),
+            "moon_brightness": _coerce_unit(visual.get("moon_brightness"), 0.4),
+            "sky_darkness": _coerce_unit(visual.get("sky_darkness"), 0.5),
         },
         "factors": factors,
     }

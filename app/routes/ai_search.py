@@ -19,25 +19,19 @@ from fastapi import APIRouter, HTTPException, Request
 from app.models.schemas import (
     AISearchRequest,
     AISearchResponse,
-    EventsRequest,
     FutureRequest,
     PlanRequest,
-    UpcomingMomentsRequest,
 )
-from app.routes.events import whats_up_tonight
 from app.routes.future import predict_future
 from app.routes.planner import create_plan
-from app.routes.upcoming_moments import upcoming_moments
 from app.services import (
     ai_explanation_service,
     astronomy_service,
     gemini_service,
     geocoding_service,
     location_service,
-    nearby_service,
     sky_events_service,
 )
-from app.services.data_sources import build_data_sources
 
 
 router = APIRouter(tags=["ai-search"])
@@ -106,7 +100,6 @@ _TIME_RE = re.compile(
     r"\b(\d{1,2}):(\d{2})\s*(am|pm)?\b|\b(\d{1,2})\s*(am|pm)\b",
     re.IGNORECASE,
 )
-_RADIUS_RE = re.compile(r"\b(\d{1,3})\s*km\b", re.IGNORECASE)
 
 
 def _detect_target(query: str) -> str:
@@ -119,17 +112,11 @@ def _detect_target(query: str) -> str:
 
 def _detect_intent(query: str) -> str:
     q = query.lower()
-    if any(p in q for p in ("what can i see", "visible now", "visible tonight", "jupiter visible", "moon up", "aurora today")):
-        return "events"
-    if any(p in q for p in ("nearby", "where should i go", "best spot", "pin location", "exact pin", "coordinates")):
-        return "nearby"
-    if any(p in q for p in ("upcoming opportunity", "upcoming moments", "coming near me")):
-        return "upcoming_moments"
-    if any(p in q for p in ("best time", "best night", "when should", "what time", "what night", "this week", "next week")):
-        return "future"
+    if any(p in q for p in ("best time", "best night", "when should", "what time", "what night")):
+        return "best_time"
     if any(p in q for p in ("recommend", "suggest", "should i", "worth it")):
-        return "plan"
-    return "plan"
+        return "recommendation"
+    return "visibility"
 
 
 def _detect_date_token(query: str) -> Tuple[str, int]:
@@ -142,8 +129,6 @@ def _detect_date_token(query: str) -> Tuple[str, int]:
 
     if "tomorrow" in q:
         return "tomorrow", 0
-    if "tonight" in q or "tn" in q:
-        return "today", 0
     if "this weekend" in q or "weekend" in q:
         return "future", 4
     if "next week" in q or "next 7 days" in q or "this week" in q:
@@ -220,32 +205,14 @@ def _parse_query(query: str) -> Dict[str, Any]:
     date_token, future_days = _detect_date_token(query)
     time_str = _smart_time(query, target)
     place_phrase = _extract_place_phrase(query)
-    radius_match = _RADIUS_RE.search(query)
-    radius_km = 100
-    if radius_match:
-        try:
-            radius_km = max(10, min(300, int(radius_match.group(1))))
-        except (TypeError, ValueError):
-            radius_km = 100
-    wants_pin = any(
-        k in query.lower()
-        for k in ("pin", "exact location", "coordinates", "coord", "lat", "longitude")
-    )
 
     return {
-        "intent": intent,
-        "route_intent": intent,
         "target": target,
-        "date_mode": date_token,
+        "intent": intent,
         "date_token": date_token,
         "future_days": future_days,
         "time": time_str,
         "place_phrase": place_phrase,
-        "radius_km": radius_km,
-        "wants_pin": wants_pin,
-        "needs_pin": wants_pin,
-        "needs_best_time": intent in {"future", "upcoming_moments"},
-        "needs_explanation": True,
     }
 
 
@@ -271,154 +238,40 @@ def _route_to_backend(
     http_request: Request,
 ) -> Tuple[str, Dict[str, Any]]:
     """Run the parsed query through the existing services."""
-    intent = parsed.get("route_intent") or parsed.get("intent")
+    intent = parsed["intent"]
     date_token = parsed["date_token"]
 
-    if intent == "events" and date_token in ("today", "tomorrow"):
+    # Pure visibility questions: just give astronomy + sky events without
+    # a full plan score.
+    if intent == "visibility" and date_token in ("today", "tomorrow"):
         date_str = _resolve_date(date_token)
-        events = whats_up_tonight(
-            EventsRequest(
-                latitude=latitude,
-                longitude=longitude,
-                date=date_str,
-                time=parsed["time"],
-            )
+        astronomy = astronomy_service.get_astronomy_data(
+            latitude, longitude, date_str, parsed["time"]
         )
-        return "events", events.model_dump()
-
-    if intent == "nearby":
-        radius = int(parsed.get("radius_km") or 100)
-        date_str = _resolve_date(date_token)
-        time_slot = str(parsed.get("time") or "23:00")
-        requested_radius = max(1, min(radius, 300))
-        expanded_radii = [
-            r for r in nearby_service.NEARBY_RADIUS_STEPS_KM if r >= min(50, requested_radius)
-        ]
-        if requested_radius not in expanded_radii:
-            expanded_radii.insert(0, requested_radius)
-        if not expanded_radii:
-            expanded_radii = [requested_radius]
-
-        optimal_full: dict | None = None
-        radius_used = requested_radius
-        for r in expanded_radii:
-            cand = nearby_service.find_optimal_sky_coordinates(
-                latitude,
-                longitude,
-                float(r),
-                date_str,
-                time_slot,
-                parsed["target"],
-                max_grid_points=nearby_service.NEARBY_MAX_GRID_POINTS,
-            )
-            radius_used = r
-            optimal_full = dict(cand)
-            if int(cand.get("score", 0)) >= nearby_service.NEARBY_GOOD_OPTIMAL_SCORE:
-                break
-            if r >= 300:
-                break
-
-        current_score = nearby_service.score_point_sync(
-            latitude, longitude, date_str, time_slot, parsed["target"]
+        events = sky_events_service.get_sky_events(
+            astronomy=astronomy,
+            date=date_str,
+            latitude=latitude,
+            longitude=longitude,
+            time=parsed["time"],
         )
-        current_location_score = int(current_score) if current_score is not None else 0
-
-        scored_places: list = []
-        if optimal_full is not None:
-            inner = nearby_service.inner_radius_near_optimal_from_area(radius_used)
-            scored_places = nearby_service.collect_scored_places_near_optimal(
-                float(optimal_full["latitude"]),
-                float(optimal_full["longitude"]),
-                inner,
-                latitude,
-                longitude,
-                date_str,
-                time_slot,
-                parsed["target"],
-            )
-
-        optimal_coordinates = (
-            nearby_service.public_optimal_coordinates(optimal_full)
-            if optimal_full is not None
-            else None
-        )
-
-        best_spot = None
-        alternatives_payload: list[dict] = []
-        if optimal_full is not None and scored_places:
-            best_spot = nearby_service.public_best_spot_row(
-                scored_places[0], latitude, longitude, rank_index=0
-            )
-            for i, alt in enumerate(scored_places[1:4], start=1):
-                alternatives_payload.append(
-                    nearby_service.public_best_spot_row(alt, latitude, longitude, rank_index=i)
-                )
-
-        max_cloud = float(optimal_full.get("grid_max_cloud_cover", 0.0)) if optimal_full else 0.0
-        opt_score = int(optimal_full.get("score", 0)) if optimal_full else 0
-        if optimal_full is not None and not best_spot:
-            msg = nearby_service.NO_VERIFIED_PUBLIC_PLACE_MESSAGE
-        elif optimal_full is not None:
-            msg = nearby_service.compose_nearby_sky_message(opt_score, max_cloud)
-        else:
-            msg = None
-
-        suggestion = None
-        if optimal_coordinates:
-            oscore = int(optimal_coordinates.get("score", 0))
-            olat = optimal_coordinates.get("latitude")
-            olon = optimal_coordinates.get("longitude")
-            if olat is not None and olon is not None:
-                dist_km = nearby_service.haversine_km(
-                    latitude, longitude, float(olat), float(olon)
-                )
-            else:
-                dist_km = 0.0
-            if best_spot and best_spot.get("name"):
-                suggestion = (
-                    f'Use {best_spot.get("name")} as the nearest verified public outdoor site near '
-                    "the computed optimal sky point."
-                )
-            elif alternatives_payload:
-                suggestion = (
-                    "Optimal sky coordinates are set; review alternatives or widen the search radius."
-                )
-            elif oscore > current_location_score + 8:
-                suggestion = (
-                    f"Best grid cell is about {dist_km:.0f} km away (score {oscore}). "
-                    "Try a larger radius to pair it with a named access point."
-                )
-
-        return "nearby", {
+        return "sky_events", {
             "date": date_str,
+            "time": parsed["time"],
             "location": {
                 "name": location_name,
                 "latitude": latitude,
                 "longitude": longitude,
             },
-            "radius_km": radius_used,
-            "current_location_score": current_location_score,
-            "optimal_coordinates": optimal_coordinates,
-            "best_spot": best_spot,
-            "alternatives": alternatives_payload,
-            "message": msg,
-            "suggestion": suggestion,
+            "astronomy": astronomy,
+            "sky_events": events,
         }
 
-    if intent == "upcoming_moments":
-        radius = int(parsed.get("radius_km") or 100)
-        days = max(1, min(int(parsed.get("future_days") or 7), 7))
-        moments = upcoming_moments(
-            UpcomingMomentsRequest(
-                latitude=latitude,
-                longitude=longitude,
-                radius_km=radius,
-                days=days,
-            )
-        )
-        return "upcoming_moments", moments.model_dump()
-
-    if date_token == "future" or intent == "future":
+    # "Future" questions go to the multi-day planner. We cap the horizon
+    # at 5 days for AI-search specifically because each day adds an
+    # outbound weather + astronomy round-trip and the user's question is
+    # almost always "soon", not "next month".
+    if date_token == "future" or intent == "best_time":
         days = parsed["future_days"] or 5
         days = max(1, min(days, 5))
         future = predict_future(
@@ -477,7 +330,7 @@ def _fallback_answer(parsed: Dict[str, Any], data: Dict[str, Any], route: str) -
             }
         )
 
-    if route == "events":
+    if route == "sky_events":
         astronomy = data.get("astronomy", {})
         events = data.get("sky_events", {})
         moon_phase = astronomy.get("moon_phase", "Unknown")
@@ -494,48 +347,6 @@ def _fallback_answer(parsed: Dict[str, Any], data: Dict[str, Any], route: str) -
             f"{planets}.{shower_text}"
         )
 
-    if route == "nearby":
-        opt = data.get("optimal_coordinates") or {}
-        pin = data.get("best_spot") or {}
-        alts = data.get("alternatives") or []
-        parts: list[str] = []
-        if opt.get("latitude") is not None and opt.get("longitude") is not None:
-            parts.append(
-                "Best sky in this search area (grid optimal pin) is at "
-                f"{float(opt['latitude']):.5f}, {float(opt['longitude']):.5f} "
-                f"(score {int(opt.get('score', 0))}/100)."
-            )
-        if pin and pin.get("latitude") is not None and pin.get("longitude") is not None:
-            parts.append(
-                f"Best named place near that pin is {pin.get('name', 'a nearby site')} at "
-                f"{float(pin['latitude']):.5f}, {float(pin['longitude']):.5f} "
-                f"(driving directions are from your search origin)."
-            )
-        if alts:
-            names = ", ".join(str(a.get("name") or "site") for a in alts[:4])
-            parts.append(f"Strong real sites from your search origin include: {names}.")
-        if data.get("message"):
-            parts.append(str(data["message"]))
-        if parts:
-            return " ".join(parts)
-        return (
-            "No verified real nearby pin was found within this radius from live data. "
-            "Try increasing the radius."
-        )
-
-    if route == "upcoming_moments":
-        moments = data.get("moments") or []
-        if moments:
-            top = moments[0]
-            return (
-                f"Top upcoming moment is {top.get('title', 'Night Sky Window')} at "
-                f"{top.get('location_name', 'a nearby place')} on {top.get('date')} {top.get('time')} "
-                f"with score {top.get('score')}/100."
-            )
-        return data.get("message") or (
-            "No strong sky-viewing moments found within this radius. Try increasing the radius or checking later dates."
-        )
-
     score = data.get("visibility_score", 0)
     return ai_explanation_service.generate_plan_summary(
         score,
@@ -547,64 +358,10 @@ def _fallback_answer(parsed: Dict[str, Any], data: Dict[str, Any], route: str) -
     )
 
 
-def _best_pin_line(pin: Optional[Dict[str, Any]]) -> str:
-    if not pin:
-        return ""
-    name = pin.get("name") or pin.get("location_name") or "Best nearby site"
-    lat = pin.get("latitude")
-    lon = pin.get("longitude")
-    score = pin.get("score")
-    dist = pin.get("distance_from_user_km") or pin.get("distance_km")
-    if lat is None or lon is None:
-        return ""
-    extras = []
-    if score is not None:
-        extras.append(f"score {int(score)}/100")
-    if dist is not None:
-        extras.append(f"{dist} km away")
-    extra_txt = f" ({', '.join(extras)})" if extras else ""
-    return f"Best real site near the optimal sky pin: {name} at {lat:.5f}, {lon:.5f}{extra_txt}."
-
-
-def _attach_pin_if_requested(
-    parsed: Dict[str, Any],
-    latitude: float,
-    longitude: float,
-    target: str,
-    data: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    if not parsed.get("wants_pin"):
-        return None
-    radius = int(parsed.get("radius_km") or 100)
-    candidates = nearby_service.get_nearby_dark_locations(
-        latitude, longitude, radius, target
-    )
-    if not candidates:
-        return None
-    pin = sorted(candidates, key=lambda c: c.get("score", 0), reverse=True)[0]
-    data["best_pin_location"] = {
-        "name": pin.get("name"),
-        "latitude": pin.get("latitude"),
-        "longitude": pin.get("longitude"),
-        "distance_km": pin.get("distance_km"),
-        "score": pin.get("score"),
-        "bortle_class": pin.get("bortle_class"),
-    }
-    return data["best_pin_location"]
-
-
 # ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
-@router.post(
-    "/ai-search",
-    response_model=AISearchResponse,
-    summary="SkyLens AI assistant",
-    description=(
-        "Parses natural-language questions, routes them to the correct SkyLens logic, and explains "
-        "results in beginner-friendly language with optional pin and 3D visualization instructions."
-    ),
-)
+@router.post("/ai-search", response_model=AISearchResponse)
 def ai_search(request: AISearchRequest, http_request: Request) -> AISearchResponse:
     try:
         client_ip = http_request.client.host if http_request.client else None
@@ -629,26 +386,12 @@ def ai_search(request: AISearchRequest, http_request: Request) -> AISearchRespon
         route, data = _route_to_backend(
             parsed, latitude, longitude, location_name, http_request
         )
-        pin_attachment = _attach_pin_if_requested(
-            parsed, latitude, longitude, parsed["target"], data
-        )
 
         # Pull a representative score for the confidence calculation.
         if route == "future":
             score = int(data.get("best_score") or 0)
         elif route == "plan":
             score = int(data.get("visibility_score") or 0)
-        elif route == "upcoming_moments":
-            moments = data.get("moments") or []
-            score = int((moments[0].get("score") if moments else 55) or 55)
-        elif route == "nearby":
-            nb_pin = data.get("best_spot") or {}
-            opt = data.get("optimal_coordinates") or {}
-            score = int(
-                nb_pin.get("score")
-                or opt.get("score")
-                or 55
-            )
         else:
             score = 60  # neutral when there is no plan-level score
 
@@ -664,65 +407,6 @@ def ai_search(request: AISearchRequest, http_request: Request) -> AISearchRespon
             ai_source = "fallback"
             answer = _fallback_answer(parsed, data, route)
 
-        pin_for_line = pin_attachment or data.get("best_spot")
-        pin_line = _best_pin_line(pin_for_line if isinstance(pin_for_line, dict) else None)
-        if pin_line and pin_line not in answer:
-            answer = f"{answer} {pin_line}".strip()
-        elif parsed.get("wants_pin"):
-            answer = (
-                f"{answer} No verified nearby pin was found from real OSM data "
-                f"within about {parsed.get('radius_km', 100)} km right now."
-            ).strip()
-
-        bp_row = data.get("best_pin_location") or data.get("best_spot")
-        opt_row = data.get("optimal_coordinates") or {}
-        if bp_row:
-            best_location_payload = {
-                "name": bp_row.get("name"),
-                "latitude": bp_row.get("latitude"),
-                "longitude": bp_row.get("longitude"),
-                "distance_km": bp_row.get("distance_km"),
-                "maps_url": (
-                    f"https://maps.google.com/?q={bp_row.get('latitude')},{bp_row.get('longitude')}"
-                    if bp_row.get("latitude") is not None and bp_row.get("longitude") is not None
-                    else None
-                ),
-            }
-        elif opt_row.get("latitude") is not None and opt_row.get("longitude") is not None:
-            best_location_payload = {
-                "name": "Optimal sky coordinates",
-                "latitude": opt_row.get("latitude"),
-                "longitude": opt_row.get("longitude"),
-                "distance_km": opt_row.get("distance_km"),
-                "maps_url": opt_row.get("maps_url")
-                or f"https://maps.google.com/?q={opt_row['latitude']},{opt_row['longitude']}",
-            }
-        else:
-            best_location_payload = None
-
-        structured_answer = {
-            "answer": answer,
-            "short_answer": answer.split(".")[0].strip() + ".",
-            "recommended_action": _fallback_answer(parsed, data, route),
-            "best_time": data.get("best_time") or data.get("time"),
-            "best_location": best_location_payload,
-            "visible_objects": (
-                (data.get("moments") or [{}])[0].get("visible_objects")
-                if route == "upcoming_moments"
-                else (data.get("sky_events") or {}).get("visible_planets", [])
-            ),
-            "visual_instructions": {
-                "sky_darkness": 0.6,
-                "star_intensity": 0.6,
-                "milky_way_opacity": 0.5,
-                "moon_glow": 0.5,
-                "highlight_direction": "S",
-                "highlight_objects": [],
-            },
-            "confidence": round(_confidence(score, ai_source) / 100, 2),
-            "data_quality_notes": [],
-        }
-
         return AISearchResponse(
             answer=answer,
             data=data,
@@ -730,13 +414,6 @@ def ai_search(request: AISearchRequest, http_request: Request) -> AISearchRespon
             parsed=parsed,
             route=route,
             ai_source=ai_source,
-            structured_answer=structured_answer,
-            data_sources=build_data_sources(
-                weather_status="live_or_fallback",
-                aurora_status="live_or_fallback",
-                nearby_status="live_or_empty",
-                ai_status=ai_source,
-            ),
         )
     except HTTPException:
         raise

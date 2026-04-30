@@ -18,7 +18,6 @@ from app.services import (
     scoring_service,
     weather_service,
 )
-from app.services.data_sources import build_data_sources
 from app.services.cache import TTLCache
 from app.services.parallel import gather
 from app.routes.planner import _recommendation_for
@@ -81,20 +80,11 @@ def _evaluate_day(
     }
 
 
-@router.post(
-    "/future",
-    response_model=FutureResponse,
-    summary="Best future night predictor",
-    description=(
-        "Scans upcoming dates and time slots for the selected location and target, then ranks the "
-        "best future shooting windows. Response includes resolved location (coordinates and name) "
-        "at the top level and on each date row."
-    ),
-)
+@router.post("/future", response_model=FutureResponse)
 def predict_future(request: FutureRequest, http_request: Request) -> FutureResponse:
     try:
         client_ip = http_request.client.host if http_request.client else None
-        latitude, longitude, location_name = location_service.resolve_location(
+        latitude, longitude, _ = location_service.resolve_location(
             request.latitude, request.longitude, request.location_name,
             client_ip=client_ip,
         )
@@ -142,10 +132,6 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
         })
 
         results: List[Dict[str, Any]] = [evaluations[d] for d in date_strs]
-        for row in results:
-            row["latitude"] = round(float(latitude), 6)
-            row["longitude"] = round(float(longitude), 6)
-            row["location_name"] = location_name
         sorted_results = sorted(results, key=lambda item: item["score"], reverse=True)
         best = sorted_results[0]
 
@@ -166,17 +152,9 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
             best_time=best["time"],
             best_score=best["score"],
             best_window=best_window_str,
-            location={"latitude": float(latitude), "longitude": float(longitude)},
-            location_name=location_name,
             results=results,
             recommendation=_recommendation_for(best["score"]),
             ai_summary=ai_explanation_service.generate_future_summary(best),
-            data_sources=build_data_sources(
-                weather_status="live_or_fallback",
-                aurora_status=("fallback" if aurora.get("source") == "fallback" else "live"),
-                nearby_status="not_used",
-                ai_status="fallback",
-            ),
         )
         _future_cache.set(cache_key, response)
         return response
