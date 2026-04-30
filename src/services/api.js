@@ -5,7 +5,7 @@
  * In dev mode Vite proxies `/api` → `http://localhost:8000`.
  */
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/+$/, '');
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'https://nightowls.janasirajput.com/api').replace(/\/+$/, '');
 
 async function parseJsonOrThrow(res) {
   const text = await res.text();
