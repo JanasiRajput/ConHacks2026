@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Wind, BarChart2, MapPin, Calendar, Clock, Search, ChevronRight, ChevronLeft, Loader2, Route, Telescope, Camera } from 'lucide-react';
-import Toggle from './toggle';
 import { getPlan, getEvents, getNearby, getAutocomplete, geocode, getFuture, getAstronomy } from '../services/api';
 import RealWorldMap from './RealWorldMap';
 
@@ -359,6 +358,13 @@ export default function Overlay() {
                       longitude: optimalLocation.longitude,
                       score: optimalLocation.score,
                       distance_km: optimalLocation.distance_km,
+                      bearing: optimalLocation.bearing,
+                      best_spot_name: bestSpotNearOptimal?.name || null,
+                      best_spot_score: bestSpotNearOptimal?.score ?? null,
+                      best_spot_distance_km: bestSpotNearOptimal?.distance_from_optimal_km ?? null,
+                      bortle_class: bestSpotNearOptimal?.bortle_class ?? null,
+                      elevation: bestSpotNearOptimal?.elevation ?? null,
+                      openness: bestSpotNearOptimal?.openness ?? null,
                     });
                     setMapMode('real_world');
                   }}
@@ -614,8 +620,16 @@ export default function Overlay() {
     },
   ];
 
-  const nextCard = () => setActiveCard((prev) => (prev + 1) % cards.length);
-  const prevCard = () => setActiveCard((prev) => (prev - 1 + cards.length) % cards.length);
+  const primaryCardIds = ['conditions', 'visibility', 'locations', 'events', 'forecast'];
+  const primaryCards = cards.filter((card) => primaryCardIds.includes(card.id));
+  const featureCards = cards.filter((card) => !primaryCardIds.includes(card.id) && card.id !== 'directions');
+
+  useEffect(() => {
+    if (activeCard >= primaryCards.length) setActiveCard(0);
+  }, [activeCard, primaryCards.length]);
+
+  const nextCard = () => setActiveCard((prev) => (prev + 1) % primaryCards.length);
+  const prevCard = () => setActiveCard((prev) => (prev - 1 + primaryCards.length) % primaryCards.length);
 
   /* --- floating element physics --- */
   useEffect(() => {
@@ -714,35 +728,18 @@ export default function Overlay() {
             <span className="font-mono text-[10px] uppercase tracking-[0.35em] text-slate-400">SYS</span>
           </div>
         </div>
-        <div className="hidden md:flex items-center gap-3 font-mono">
-          <span className="text-[10px] uppercase tracking-[0.3em] text-slate-400">Active Slide</span>
-          <button
-            type="button"
-            onClick={() => handleNavClick(activeCard)}
-            className="px-3 py-1 rounded-full border border-white/15 bg-white/5 text-xs tracking-[0.15em] text-slate-200 hover:bg-white/10 transition-colors"
-          >
-            {String(activeCard + 1).padStart(2, '0')} / {String(cards.length).padStart(2, '0')} · {cards[activeCard]?.id?.toUpperCase()}
-          </button>
+        <div className="hidden md:flex gap-6 font-mono text-base tracking-widest text-slate-300">
+          {primaryCards.map((card, index) => (
+            <button
+              key={card.id}
+              onClick={() => handleNavClick(index)}
+              className={`hover:text-white transition-colors uppercase ${activeCard === index ? 'text-white font-bold border-b border-white' : ''}`}
+            >
+              {card.id}
+            </button>
+          ))}
         </div>
-        <div className="flex items-center gap-6 hidden sm:flex">
-          <Toggle 
-            label={mapMode === 'space' ? "SPACE_VIEW" : "REAL_MAP_VIEW"} 
-            onToggle={(isOn) => {
-              if (isOn) {
-                setMapMode('real_world');
-                // Use first location if available, otherwise fallback
-                if (!selectedMapLocation && nearbyData?.best_locations?.length) {
-                   setSelectedMapLocation(nearbyData.best_locations[0]);
-                }
-              } else {
-                setMapMode('space');
-              }
-            }} 
-          />
-          <div className="text-[10px] font-mono text-slate-400">
-            SYS_STATUS: <span className="text-green-400 font-bold">NOMINAL</span>
-          </div>
-        </div>
+        <div className="hidden sm:block w-[160px]" />
       </nav>
 
       {/* Main Content Flow */}
@@ -866,7 +863,7 @@ export default function Overlay() {
 
             <div className="relative w-full h-full flex items-center justify-center">
               <AnimatePresence mode="popLayout">
-                {cards.map((card, index) => {
+                {primaryCards.map((card, index) => {
                   if (index !== activeCard) return null;
 
                   return (
@@ -898,7 +895,7 @@ export default function Overlay() {
                       </div>
 
                       <div className="flex justify-center gap-2 mt-4 pb-2">
-                        {cards.map((_, dotIndex) => (
+                        {primaryCards.map((_, dotIndex) => (
                           <div 
                             key={dotIndex} 
                             className={`w-2 h-2 rounded-full transition-all duration-300 ${dotIndex === activeCard ? 'bg-white w-6' : 'bg-white/20'}`}
@@ -928,6 +925,27 @@ export default function Overlay() {
             </button>
           </div>
 
+        </section>
+
+        <section className="w-full max-w-6xl px-6 py-20">
+          <div className="mb-8 text-center">
+            <span className="font-mono text-xs tracking-[0.28em] uppercase text-cyan-300">Advanced Insights</span>
+            <h3 className="mt-3 text-2xl font-bold tracking-[0.16em] uppercase text-white">Time Planning · Future · Astronomy · Camera</h3>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {featureCards.map((card) => (
+              <div key={`feature-${card.id}`} className="bg-[#08111f]/95 border border-white/10 rounded-[1.5rem] p-5 shadow-[0_20px_60px_rgba(0,165,255,0.12)]">
+                <div className="flex items-center gap-3 mb-4 pb-2 border-b border-white/10">
+                  <card.icon className={`w-5 h-5 ${card.accent}`} />
+                  <h4 className="text-sm font-bold tracking-[0.18em] uppercase text-white">{card.title}</h4>
+                </div>
+                <div className="space-y-3">
+                  {card.content}
+                </div>
+              </div>
+            ))}
+          </div>
         </section>
 
       </div>

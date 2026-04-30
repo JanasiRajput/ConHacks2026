@@ -5,7 +5,11 @@
  * In dev mode Vite proxies `/api` → `http://localhost:8000`.
  */
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'https://nightowls.janasirajput.com/api').replace(/\/+$/, '');
+const API_BASE = (
+  import.meta.env.DEV
+    ? '/api'
+    : (import.meta.env.VITE_API_BASE_URL || '')
+).replace(/\/+$/, '');
 
 async function parseJsonOrThrow(res) {
   const text = await res.text();
@@ -18,6 +22,9 @@ async function parseJsonOrThrow(res) {
 }
 
 async function request(path, body) {
+  if (!API_BASE) {
+    throw new Error('Missing VITE_API_BASE_URL for production build.');
+  }
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -107,6 +114,9 @@ export async function getUpcomingMoments({ latitude, longitude, radiusKm = 100, 
 /*  Geocode helper — uses Nominatim for basic resolution               */
 /* ------------------------------------------------------------------ */
 export async function geocode(query) {
+  if (!API_BASE) {
+    throw new Error('Missing VITE_API_BASE_URL for production build.');
+  }
   const res = await fetch(`${API_BASE}/places/geocode?input=${encodeURIComponent(query)}`);
   if (!res.ok) {
     const err = await parseJsonOrThrow(res).catch(() => ({ detail: res.statusText }));
@@ -124,6 +134,7 @@ export async function geocode(query) {
 /*  Autocomplete helper — calls internal proxy                      */
 /* ------------------------------------------------------------------ */
 export async function getAutocomplete(query) {
+  if (!API_BASE) return [];
   const res = await fetch(`${API_BASE}/places/autocomplete?input=${encodeURIComponent(query)}`);
   if (!res.ok) return [];
   const data = await parseJsonOrThrow(res).catch(() => ({ predictions: [] }));
