@@ -81,7 +81,7 @@ async def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyRe
                 latitude, longitude, _label = google_loc
 
         cache_key = (
-            "v3",
+            "v4",
             round(latitude, 2),
             round(longitude, 2),
             int(request.radius_km),
