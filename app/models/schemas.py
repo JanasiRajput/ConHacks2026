@@ -28,7 +28,6 @@ class PlanResponse(BaseModel):
     best_window_detail: Optional[Dict[str, Any]] = None
     target: str
     location_name: str
-    location: Optional[Dict[str, float]] = None
     date: str
     time: str
     weather: Dict[str, Any]
@@ -39,8 +38,6 @@ class PlanResponse(BaseModel):
     sky_events: Optional[Dict[str, Any]] = None
     camera_settings: Dict[str, Any]
     ai_insight: Optional[Dict[str, Any]] = None
-    data_sources: Optional[Dict[str, Any]] = None
-    best_nearby_spot: Optional[Dict[str, Any]] = None
     recommendation: str
     ai_summary: str
     breakdown: Dict[str, Any]
@@ -62,18 +59,9 @@ class FutureResponse(BaseModel):
     best_time: str
     best_score: int
     best_window: str
-    location: Dict[str, float] = Field(
-        ...,
-        description="Resolved latitude/longitude for this forecast (same for every row in results).",
-    )
-    location_name: str = Field(
-        ...,
-        description="Human-readable place label (client name, reverse geocode, or IP/default).",
-    )
     results: List[Dict[str, Any]]
     recommendation: str
     ai_summary: str
-    data_sources: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -88,20 +76,15 @@ class NearbyRequest(BaseModel):
 
 
 class NearbyResponse(BaseModel):
-    """Physics-first nearby: optimal sky pin, then scored real places (no duplicate arrays)."""
-
-    current_location_score: Optional[int] = Field(
-        default=None,
-        description="Visibility score at the user's resolved search origin (same target/date).",
-    )
+    current_location_score: int
     optimal_coordinates: Optional[Dict[str, Any]] = None
     best_spot: Optional[Dict[str, Any]] = None
-    alternatives: List[Dict[str, Any]] = Field(default_factory=list)
+    alternatives: Optional[List[Dict[str, Any]]] = None
+    best_locations: List[Dict[str, Any]]
+    recommended_locations: Optional[List[Dict[str, Any]]] = None
+    recommendation: str
     message: Optional[str] = None
-    suggestion: Optional[str] = Field(
-        default=None,
-        description="Short guidance comparing optimal sky vs verified places.",
-    )
+    suggestion: Optional[str] = None
     data_sources: Optional[Dict[str, Any]] = None
 
 
@@ -174,7 +157,6 @@ class EventsResponse(BaseModel):
     sky_events: Dict[str, Any]
     aurora: Dict[str, Any]
     summary: str
-    data_sources: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -194,8 +176,6 @@ class AISearchResponse(BaseModel):
     parsed: Dict[str, Any]
     route: str
     ai_source: str
-    structured_answer: Optional[Dict[str, Any]] = None
-    data_sources: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -235,4 +215,3 @@ class UpcomingMomentsRequest(BaseModel):
 class UpcomingMomentsResponse(BaseModel):
     moments: List[SkyMoment]
     message: Optional[str] = None
-    data_sources: Optional[Dict[str, Any]] = None
