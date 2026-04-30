@@ -1,9 +1,6 @@
 {
   "version": 2,
-  "routes": [
-    { "src": "^/assets/(.*)$", "dest": "/dist/assets/$1" },
-    { "src": "^/cesium/(.*)$", "dest": "/dist/cesium/$1" },
-    { "src": "^/favicon\\.ico$", "dest": "/dist/favicon.ico" },
-    { "src": "^/.*$", "dest": "/dist/index.html" }
-  ]
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
 }
