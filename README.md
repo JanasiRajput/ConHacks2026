@@ -8,7 +8,7 @@ FastAPI backend for **Night Owl (SkyLens 3D)** — an astrophotography planning 
 
 ### 🌍 Main Dashboard
 
-![Main UI](.main-ui.png)
+![Main UI](main-ui.png)
 
 ---
 
