@@ -209,7 +209,7 @@ MIT License
 
 ## 👨‍💻 Author
 
-**Angus Praker**
+**Janasi Rajput, Manasi Rajput, Chan Gaganjeet, Khushbu**
 Night Owl / SkyLens Project
 
 
