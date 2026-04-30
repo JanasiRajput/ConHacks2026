@@ -18,14 +18,9 @@ from app.services import (
     scoring_service,
     weather_service,
 )
-from app.services.cache import TTLCache
-
 
 router = APIRouter(tags=["nearby"])
 
-# Nearby is the most expensive endpoint (10+ candidate points, each
-# hitting 3 upstreams). Caching keeps the second visit instant.
-_nearby_cache: TTLCache = TTLCache(ttl_seconds=180.0, max_entries=64)
 _NEARBY_RESPONSE_VERSION = 2
 
 
@@ -158,17 +153,6 @@ def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyResponse
             client_ip=client_ip,
         )
 
-        cache_key = (
-            _NEARBY_RESPONSE_VERSION,
-            round(latitude, 2),  # ~1km bucket - nearby results don't change rapidly
-            round(longitude, 2),
-            int(request.radius_km),
-            request.target,
-        )
-        cached = _nearby_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
         # Compute current score and candidate sweep sequentially.
         # Both internally use parallel.gather() to fan out their own
         # upstream calls; running both at once would risk thread pool
@@ -246,7 +230,6 @@ def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyResponse
                 "google": "Google APIs are used in /api/places for search/geocode, not for light-pollution values",
             },
         )
-        _nearby_cache.set(cache_key, response)
         return response
     except HTTPException:
         raise

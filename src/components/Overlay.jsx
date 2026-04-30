@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Wind, BarChart2, MapPin, Calendar, Clock, Search, ChevronRight, ChevronLeft, Loader2, Route, Telescope, Camera } from 'lucide-react';
 import { getPlan, getEvents, getNearby, getAutocomplete, geocode, getFuture, getAstronomy } from '../services/api';
-import RealWorldMap from './RealWorldMap';
+import LocationDetail from './LocationDetail';
 
 const fadeInUp = {
   initial: { opacity: 0, y: 30 },
@@ -34,43 +34,55 @@ export default function Overlay() {
   const [predictions, setPredictions] = useState([]);
   const [showDropdown, setShowDropdown] = useState(false);
   const inputRef = useRef(null);
-  
-  // Use a ref to store the latest abort controller for debouncing
-  const abortControllerRef = useRef(null);
 
-  const fetchPredictions = useCallback(async (input) => {
-    if (!input.trim()) {
-      setPredictions([]);
-      return;
-    }
-    
-    // Cancel previous request
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    abortControllerRef.current = new AbortController();
-    
+  // Cancellation + debounce for autocomplete. Without these, every
+  // keystroke fires a Nominatim call -> hits their 1 req/sec rate
+  // limit -> the dropdown silently never updates.
+  const abortControllerRef = useRef(null);
+  const debounceTimerRef = useRef(null);
+
+  const runAutocomplete = useCallback(async (input) => {
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     try {
-      const results = await getAutocomplete(input);
+      const results = await getAutocomplete(input, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       if (results && results.length > 0) {
         setPredictions(results);
         setShowDropdown(true);
       } else {
         setPredictions([]);
+        setShowDropdown(false);
       }
     } catch (err) {
-      if (err.name !== 'AbortError') {
-        console.error('Autocomplete error:', err);
-        setPredictions([]);
-      }
+      if (err && err.name === 'AbortError') return;
+      console.error('Autocomplete error:', err);
+      setPredictions([]);
     }
   }, []);
 
   const handleInputChange = (e) => {
     const value = e.target.value;
     setSearchQuery(value);
-    fetchPredictions(value);
+
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    if (!value.trim()) {
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+      setPredictions([]);
+      setShowDropdown(false);
+      return;
+    }
+    debounceTimerRef.current = setTimeout(() => runAutocomplete(value), 320);
   };
+
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+    };
+  }, []);
 
   const selectPrediction = (prediction) => {
     setSearchQuery(prediction.description);
@@ -960,12 +972,12 @@ export default function Overlay() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.5 }}
-            className="fixed inset-0 z-50 bg-black"
+            transition={{ duration: 0.4 }}
+            className="fixed inset-0 z-50 bg-[#03030b] overflow-hidden"
           >
-            <RealWorldMap 
-               location={selectedMapLocation} 
-               onClose={() => setMapMode('space')} 
+            <LocationDetail
+              location={selectedMapLocation}
+              onClose={() => setMapMode('space')}
             />
           </motion.div>
         )}
