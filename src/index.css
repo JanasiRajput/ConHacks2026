@@ -1,0 +1,80 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Arizonia&family=Inter:wght@300;400;600;800&family=Montserrat:wght@800;900&family=Orbitron:wght@500;700;900&family=Space+Mono:ital,wght@0,400;0,700;1,400;1,700&display=swap');
+
+@theme {
+  --font-sans: 'Inter', sans-serif;
+  --font-display: 'Orbitron', sans-serif;
+  --font-poster: 'Montserrat', sans-serif;
+  --font-mono: 'Space Mono', monospace;
+  --font-retro: 'Retropix', var(--font-display), sans-serif;
+  --font-site: 'Arizonia', cursive;
+  --color-space-black: #000000;
+  --color-deep-space: #050510;
+  --color-primary: #00f3ff;
+  --color-secondary: #a100ff;
+  --color-night-white: #fcfcfc;
+  --color-night-gray: #f0f0f0;
+}
+
+@font-face {
+  font-family: 'Retropix';
+  src: url('/fonts/Retropix.woff2') format('woff2'),
+       url('/fonts/Retropix.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+.font-retropix {
+  font-family: var(--font-retro) !important;
+}
+
+.font-card {
+  font-family: var(--font-card) !important;
+  letter-spacing: 0.04em;
+}
+
+body {
+  background-color: var(--color-space-black);
+  color: #ffffff;
+  overflow-x: hidden;
+  font-family: var(--font-sans);
+}
+
+.site-title {
+  font-family: var(--font-site), cursive !important;
+  letter-spacing: 0.2em;
+  text-shadow: 0 0 18px rgba(255,255,255,0.14);
+}
+
+.beau-rivage-regular {
+  font-family: "Beau Rivage", cursive;
+  font-weight: 400;
+  font-style: normal;
+}
+
+#root {
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
+}
+
+/* Custom Utilities that Tailwind doesn't easily cover for 3D/Effects */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.02);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
+}
+
+.glow-text-white {
+  text-shadow: 0 0 20px rgba(255, 255, 255, 0.4);
+}
+
+.glow-text-cyan {
+  text-shadow: 0 0 15px rgba(0, 243, 255, 0.6);
+}
+
+.glow-text-purple {
+  text-shadow: 0 0 15px rgba(161, 0, 255, 0.6);
+}
