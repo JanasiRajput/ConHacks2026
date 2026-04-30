@@ -84,16 +84,17 @@ def _evaluate_day(
 @router.post(
     "/future",
     response_model=FutureResponse,
-    summary="Future Night Predictor",
+    summary="Best future night predictor",
     description=(
-        "Scan upcoming nights for one location and rank the best windows. "
-        "Best for: 'When is the best night this week?'"
+        "Scans upcoming dates and time slots for the selected location and target, then ranks the "
+        "best future shooting windows. Response includes resolved location (coordinates and name) "
+        "at the top level and on each date row."
     ),
 )
 def predict_future(request: FutureRequest, http_request: Request) -> FutureResponse:
     try:
         client_ip = http_request.client.host if http_request.client else None
-        latitude, longitude, _ = location_service.resolve_location(
+        latitude, longitude, location_name = location_service.resolve_location(
             request.latitude, request.longitude, request.location_name,
             client_ip=client_ip,
         )
@@ -141,6 +142,10 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
         })
 
         results: List[Dict[str, Any]] = [evaluations[d] for d in date_strs]
+        for row in results:
+            row["latitude"] = round(float(latitude), 6)
+            row["longitude"] = round(float(longitude), 6)
+            row["location_name"] = location_name
         sorted_results = sorted(results, key=lambda item: item["score"], reverse=True)
         best = sorted_results[0]
 
@@ -161,6 +166,8 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
             best_time=best["time"],
             best_score=best["score"],
             best_window=best_window_str,
+            location={"latitude": float(latitude), "longitude": float(longitude)},
+            location_name=location_name,
             results=results,
             recommendation=_recommendation_for(best["score"]),
             ai_summary=ai_explanation_service.generate_future_summary(best),
