@@ -5,7 +5,17 @@
  * In dev mode Vite proxies `/api` → `http://localhost:8000`.
  */
 
-const API_BASE = '/api';
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/+$/, '');
+
+async function parseJsonOrThrow(res) {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    const snippet = text.slice(0, 120).replace(/\s+/g, ' ');
+    throw new Error(`Expected JSON but received non-JSON response (${res.status}). ${snippet}`);
+  }
+}
 
 async function request(path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -14,10 +24,10 @@ async function request(path, body) {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    const err = await parseJsonOrThrow(res).catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || `API ${res.status}`);
   }
-  return res.json();
+  return parseJsonOrThrow(res);
 }
 
 /* ------------------------------------------------------------------ */
@@ -99,10 +109,10 @@ export async function getUpcomingMoments({ latitude, longitude, radiusKm = 100, 
 export async function geocode(query) {
   const res = await fetch(`${API_BASE}/places/geocode?input=${encodeURIComponent(query)}`);
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    const err = await parseJsonOrThrow(res).catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || `API ${res.status}`);
   }
-  const data = await res.json();
+  const data = await parseJsonOrThrow(res);
   return {
     latitude: Number(data.latitude),
     longitude: Number(data.longitude),
@@ -116,6 +126,6 @@ export async function geocode(query) {
 export async function getAutocomplete(query) {
   const res = await fetch(`${API_BASE}/places/autocomplete?input=${encodeURIComponent(query)}`);
   if (!res.ok) return [];
-  const data = await res.json();
+  const data = await parseJsonOrThrow(res).catch(() => ({ predictions: [] }));
   return data.predictions || [];
 }

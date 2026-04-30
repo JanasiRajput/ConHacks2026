@@ -714,18 +714,16 @@ export default function Overlay() {
             <span className="font-mono text-[10px] uppercase tracking-[0.35em] text-slate-400">SYS</span>
           </div>
         </div>
-        <ul className="hidden md:flex gap-6 font-mono text-base tracking-widest text-slate-300">
-          {cards.map((card, index) => (
-            <li key={card.id}>
-              <button 
-                onClick={() => handleNavClick(index)}
-                className={`hover:text-white transition-colors uppercase ${activeCard === index ? 'text-white font-bold border-b border-white' : ''}`}
-              >
-                {card.id}
-              </button>
-            </li>
-          ))}
-        </ul>
+        <div className="hidden md:flex items-center gap-3 font-mono">
+          <span className="text-[10px] uppercase tracking-[0.3em] text-slate-400">Active Slide</span>
+          <button
+            type="button"
+            onClick={() => handleNavClick(activeCard)}
+            className="px-3 py-1 rounded-full border border-white/15 bg-white/5 text-xs tracking-[0.15em] text-slate-200 hover:bg-white/10 transition-colors"
+          >
+            {String(activeCard + 1).padStart(2, '0')} / {String(cards.length).padStart(2, '0')} · {cards[activeCard]?.id?.toUpperCase()}
+          </button>
+        </div>
         <div className="flex items-center gap-6 hidden sm:flex">
           <Toggle 
             label={mapMode === 'space' ? "SPACE_VIEW" : "REAL_MAP_VIEW"} 
