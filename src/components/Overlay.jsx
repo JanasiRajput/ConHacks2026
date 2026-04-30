@@ -175,6 +175,9 @@ export default function Overlay() {
         { label: 'Aurora Probability', value: 0 },
       ];
 
+  const optimalLocation = nearbyData?.optimal_coordinates || null;
+  const bestSpotNearOptimal = nearbyData?.best_spot || null;
+
   const locationsList = nearbyData?.best_locations?.slice(0, 3) ?? [
     { name: 'Search a location to load', score: '—', distance: '' },
   ];
@@ -266,6 +269,59 @@ export default function Overlay() {
       accent: 'text-blue-400',
       content: (
         <div className="space-y-4 font-card">
+          {(optimalLocation || bestSpotNearOptimal) && (
+            <div className="space-y-3">
+              {optimalLocation && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedMapLocation({
+                      name: 'Calculated Optimal Coordinate',
+                      latitude: optimalLocation.latitude,
+                      longitude: optimalLocation.longitude,
+                      score: optimalLocation.score,
+                      distance_km: optimalLocation.distance_km,
+                    });
+                    setMapMode('real_world');
+                  }}
+                  className="w-full text-left p-4 bg-cyan-500/10 border border-cyan-400/35 rounded-xl hover:bg-cyan-500/15 transition-all"
+                >
+                  <span className="font-bold text-cyan-200 text-lg block">
+                    Calculated Optimal Coordinate
+                  </span>
+                  <span className="text-sm text-cyan-100/80 block mt-1">
+                    {Number(optimalLocation.latitude).toFixed(5)}, {Number(optimalLocation.longitude).toFixed(5)}
+                  </span>
+                  <span className="text-xs text-cyan-100/70 block mt-1">
+                    Score {optimalLocation.score ?? '—'} · {optimalLocation.distance_km ?? '—'} km · bearing {optimalLocation.bearing ?? '—'}°
+                  </span>
+                </button>
+              )}
+
+              {bestSpotNearOptimal && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedMapLocation(bestSpotNearOptimal);
+                    setMapMode('real_world');
+                  }}
+                  className="w-full text-left p-4 bg-indigo-500/10 border border-indigo-400/30 rounded-xl hover:bg-indigo-500/15 transition-all"
+                >
+                  <span className="font-bold text-indigo-200 text-lg block">
+                    Best Spot Near Optimal
+                  </span>
+                  <span className="text-sm text-indigo-100/85 block mt-1">
+                    {bestSpotNearOptimal.name || 'Unnamed location'}
+                  </span>
+                  <span className="text-xs text-indigo-100/70 block mt-1">
+                    Score {bestSpotNearOptimal.score ?? '—'} · {bestSpotNearOptimal.distance_km ?? '—'} km from current
+                    {bestSpotNearOptimal.distance_from_optimal_km != null ? ` · ${bestSpotNearOptimal.distance_from_optimal_km} km from optimal` : ''}
+                  </span>
+                </button>
+              )}
+            </div>
+          )}
+
           {locationsList.map((loc, index) => (
             <button 
               key={index} 
