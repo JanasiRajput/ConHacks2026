@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 import requests
+from app.services.cache import TTLCache
 
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_TIMEOUT_SECONDS = 6
+_DAILY_FORECAST_CACHE: TTLCache = TTLCache(ttl_seconds=600.0, max_entries=512)
 
 # Hourly variables we request from Open-Meteo. Names must match the API.
 _HOURLY_VARS = [
@@ -70,23 +72,27 @@ def _fetch_open_meteo(
     time: Optional[str],
 ) -> Optional[Dict[str, Any]]:
     """Call Open-Meteo and return a normalized response, or None on soft failure."""
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "hourly": ",".join(_HOURLY_VARS),
-        "wind_speed_unit": "kmh",
-        "timezone": "auto",
-        "start_date": date,
-        "end_date": date,
-    }
+    cache_key = (round(latitude, 3), round(longitude, 3), date)
+    payload = _DAILY_FORECAST_CACHE.get(cache_key)
+    if payload is None:
+        params = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "hourly": ",".join(_HOURLY_VARS),
+            "wind_speed_unit": "kmh",
+            "timezone": "auto",
+            "start_date": date,
+            "end_date": date,
+        }
 
-    response = requests.get(
-        OPEN_METEO_URL,
-        params=params,
-        timeout=OPEN_METEO_TIMEOUT_SECONDS,
-    )
-    response.raise_for_status()
-    payload = response.json()
+        response = requests.get(
+            OPEN_METEO_URL,
+            params=params,
+            timeout=OPEN_METEO_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        _DAILY_FORECAST_CACHE.set(cache_key, payload)
 
     hourly = payload.get("hourly") or {}
     timestamps = hourly.get("time") or []

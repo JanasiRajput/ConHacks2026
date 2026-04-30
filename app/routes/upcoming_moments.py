@@ -7,9 +7,9 @@ within the process thread pool and to avoid hammering free-tier APIs.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
+import time
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -29,7 +29,7 @@ from app.services import (
     scoring_service,
     weather_service,
 )
-from app.services.data_sources import build_data_sources
+from app.services.cache import TTLCache
 from app.services.parallel import gather
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,10 @@ _NO_MOMENTS_MSG = (
     "No strong sky-viewing moments found within this radius. Try increasing "
     "the radius or checking later dates."
 )
+_PARTIAL_MOMENTS_MSG = (
+    "Showing best moments found so far. Some checks took too long because "
+    "upstream services are slow right now."
+)
 
 # Upstream budget: each slot is 2 HTTP calls (weather + astronomy); light
 # pollution + aurora are fetched once per place. These caps keep worst-case
@@ -52,6 +56,8 @@ _MAX_PLACES = 5
 _CHUNK_SIZE = 8
 _MIN_SCORE = 50
 _MAX_SUN_ALT_FOR_MOMENT = -5.0  # reject slots that are still too bright
+_SOFT_TIME_BUDGET_SECONDS = 24.0
+_UPCOMING_CACHE: TTLCache = TTLCache(ttl_seconds=120.0, max_entries=128)
 
 _NIGHT_SLOT_TIMES: Tuple[Tuple[int, str], ...] = (
     (0, "21:00"),
@@ -86,21 +92,19 @@ def _iter_night_slots(n_nights: int) -> List[Tuple[str, str]]:
 def _gather_chunked(
     tasks: Dict[str, Callable[[], Any]],
     chunk_size: int = _CHUNK_SIZE,
-) -> Dict[str, Any]:
+    *,
+    deadline_monotonic: Optional[float] = None,
+) -> Tuple[Dict[str, Any], bool]:
     out: Dict[str, Any] = {}
+    timed_out = False
     keys = list(tasks.keys())
     for i in range(0, len(keys), chunk_size):
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            timed_out = True
+            break
         chunk = {k: tasks[k] for k in keys[i : i + chunk_size]}
-        try:
-            out.update(gather(chunk))
-        except Exception:
-            # Partial-results mode: keep successful slots and skip failures.
-            for key, task in chunk.items():
-                try:
-                    out[key] = task()
-                except Exception:
-                    out[key] = None
-    return out
+        out.update(gather(chunk))
+    return out, timed_out
 
 
 def _visible_objects(astronomy: Dict[str, Any]) -> List[str]:
@@ -263,16 +267,8 @@ def _evaluate_slot(
     }
 
 
-@router.post(
-    "/upcoming-moments",
-    response_model=UpcomingMomentsResponse,
-    summary="Upcoming sky moments near you",
-    description=(
-        "Combines nearby real places, future dates, and scoring to find saveable upcoming opportunities "
-        "such as Milky Way windows, planet viewing, aurora watch, or star visibility."
-    ),
-)
-async def upcoming_moments(body: UpcomingMomentsRequest) -> UpcomingMomentsResponse:
+@router.post("/upcoming-moments", response_model=UpcomingMomentsResponse)
+def upcoming_moments(body: UpcomingMomentsRequest) -> UpcomingMomentsResponse:
     try:
         try:
             radius = int(round(body.radius_km))
@@ -284,45 +280,37 @@ async def upcoming_moments(body: UpcomingMomentsRequest) -> UpcomingMomentsRespo
 
         radius = max(1, min(radius, 300))
         days = max(1, min(days, 7))
+        cache_key = (
+            round(body.latitude, 3),
+            round(body.longitude, 3),
+            radius,
+            days,
+        )
+        cached = _UPCOMING_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
-        places = await asyncio.to_thread(
-            nearby_service.list_real_named_places,
+        places = nearby_service.list_real_named_places(
             body.latitude,
             body.longitude,
             radius,
         )
         if not places:
-            return UpcomingMomentsResponse(
-                moments=[],
-                message=_NO_PLACES_MSG,
-                data_sources=build_data_sources(
-                    weather_status="not_used",
-                    aurora_status="not_used",
-                    nearby_status="empty",
-                    ai_status=None,
-                ),
-            )
+            return UpcomingMomentsResponse(moments=[], message=_NO_PLACES_MSG)
 
         places = places[:_MAX_PLACES]
         slots = _iter_night_slots(days)
 
         tasks: Dict[str, Callable[[], Any]] = {}
         for pidx, place in enumerate(places):
-            lp_f = asyncio.to_thread(
-                light_pollution_service.get_light_pollution_data,
+            lp = light_pollution_service.get_light_pollution_data(
                 float(place["latitude"]),
                 float(place["longitude"]),
             )
-            aur_f = asyncio.to_thread(
-                aurora_service.get_aurora_data,
+            aur = aurora_service.get_aurora_data(
                 float(place["latitude"]),
                 float(place["longitude"]),
             )
-            lp, aur = await asyncio.gather(lp_f, aur_f, return_exceptions=True)
-            if isinstance(lp, Exception):
-                lp = {"bortle_class": 5, "source": "fallback"}
-            if isinstance(aur, Exception):
-                aur = {"aurora_chance": "Low", "source": "fallback"}
             for date_str, time_str in slots:
                 key = f"{pidx}:{date_str}:{time_str}"
 
@@ -337,7 +325,10 @@ async def upcoming_moments(body: UpcomingMomentsRequest) -> UpcomingMomentsRespo
 
                 tasks[key] = _job
 
-        raw_results = _gather_chunked(tasks, _CHUNK_SIZE)
+        deadline = time.monotonic() + _SOFT_TIME_BUDGET_SECONDS
+        raw_results, timed_out = _gather_chunked(
+            tasks, _CHUNK_SIZE, deadline_monotonic=deadline
+        )
         candidates: List[Dict[str, Any]] = [
             v for v in raw_results.values() if v is not None
         ]
@@ -345,28 +336,15 @@ async def upcoming_moments(body: UpcomingMomentsRequest) -> UpcomingMomentsRespo
         top = candidates[:5]
 
         if not top:
-            return UpcomingMomentsResponse(
-                moments=[],
-                message=_NO_MOMENTS_MSG,
-                data_sources=build_data_sources(
-                    weather_status="live_or_fallback",
-                    aurora_status="live_or_fallback",
-                    nearby_status="live",
-                    ai_status=None,
-                ),
-            )
+            return UpcomingMomentsResponse(moments=[], message=_NO_MOMENTS_MSG)
 
         moments = [SkyMoment(**m) for m in top]
-        return UpcomingMomentsResponse(
+        response = UpcomingMomentsResponse(
             moments=moments,
-            message=None,
-            data_sources=build_data_sources(
-                weather_status="live_or_fallback",
-                aurora_status="live_or_fallback",
-                nearby_status="live",
-                ai_status=None,
-            ),
+            message=_PARTIAL_MOMENTS_MSG if timed_out else None,
         )
+        _UPCOMING_CACHE.set(cache_key, response)
+        return response
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
