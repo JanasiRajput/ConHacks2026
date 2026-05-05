@@ -18,32 +18,10 @@ from app.services import (
     scoring_service,
     weather_service,
 )
-from app.services.response_cache import TTLCache
 
 router = APIRouter(tags=["nearby"])
 
 _NEARBY_RESPONSE_VERSION = 2
-
-# 10-minute response cache keyed by (lat-grid, lon-grid, radius, target,
-# date). A repeat search in the same ~10 km cell within 10 min returns in
-# ~1 ms instead of triggering a full weather+astronomy+light-pollution
-# fan-out across many candidate sites.
-_CACHE = TTLCache(ttl_seconds=600.0, max_entries=128)
-
-
-def _cache_key(
-    latitude: float,
-    longitude: float,
-    radius_km: float,
-    target: str,
-) -> tuple:
-    return (
-        round(latitude, 1),
-        round(longitude, 1),
-        int(round(radius_km)),
-        (target or "").lower(),
-        datetime.utcnow().strftime("%Y-%m-%d"),
-    )
 
 
 def _destination_point(
@@ -175,13 +153,6 @@ def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyResponse
             client_ip=client_ip,
         )
 
-        # Coarse cache key -> repeat searches in the same ~10 km cell skip
-        # the entire fan-out below.
-        cache_key = _cache_key(latitude, longitude, request.radius_km, request.target)
-        cached = _CACHE.get(cache_key)
-        if cached is not None:
-            return cached
-
         # Compute current score and candidate sweep sequentially.
         # Both internally use parallel.gather() to fan out their own
         # upstream calls; running both at once would risk thread pool
@@ -259,7 +230,6 @@ def find_nearby(request: NearbyRequest, http_request: Request) -> NearbyResponse
                 "google": "Google APIs are used in /api/places for search/geocode, not for light-pollution values",
             },
         )
-        _CACHE.put(cache_key, response)
         return response
     except HTTPException:
         raise

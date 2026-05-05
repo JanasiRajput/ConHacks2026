@@ -5,15 +5,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
-from app.services.response_cache import TTLCache
-
 router = APIRouter(prefix="/places", tags=["places"])
 
 logger = logging.getLogger("skylens.places")
-
-# Short TTL: repeat typing / backspacing the same substring should not
-# hammer Google+Nominatim on every keystroke burst.
-_AUTOCOMPLETE_CACHE = TTLCache(ttl_seconds=120.0, max_entries=256)
 
 _TIMEOUT = httpx.Timeout(6.0, connect=4.0)
 # Nominatim's usage policy requires a User-Agent that identifies the app and
@@ -210,11 +204,6 @@ async def autocomplete(input: str = Query(..., min_length=1)) -> Dict[str, Any]:
     If Google returns HTTP 200 with no predictions (often ZERO_RESULTS for
     short prefixes, or overly strict filters), fall back to Nominatim so the
     dropdown is not silently empty."""
-    cache_key = input.strip().lower()
-    cached = _AUTOCOMPLETE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-
     api_key = _maps_api_key()
     google_was_tried = bool(api_key)
 
@@ -225,7 +214,6 @@ async def autocomplete(input: str = Query(..., min_length=1)) -> Dict[str, Any]:
             google_was_tried=google_was_tried,
             query=input.strip(),
         )
-        _AUTOCOMPLETE_CACHE.put(cache_key, body)
         return body
 
     if not api_key:
@@ -259,9 +247,7 @@ async def autocomplete(input: str = Query(..., min_length=1)) -> Dict[str, Any]:
         raise HTTPException(status_code=502, detail="Invalid autocomplete response format")
 
     if predictions:
-        out: Dict[str, Any] = {"predictions": predictions}
-        _AUTOCOMPLETE_CACHE.put(cache_key, out)
-        return out
+        return {"predictions": predictions}
 
     logger.info(
         "Google autocomplete empty (%s) for %r — trying Nominatim",

@@ -19,31 +19,10 @@ from app.services import (
     weather_service,
 )
 from app.services.parallel import gather
-from app.services.response_cache import TTLCache
 from app.routes.planner import _recommendation_for
 
 
 router = APIRouter(tags=["future"])
-
-# 10-minute response cache keyed by (lat-grid, lon-grid, days, target,
-# today). Repeat 7-day forecasts for the same area skip a multi-day
-# weather/astronomy fan-out that otherwise dominates page load time.
-_CACHE = TTLCache(ttl_seconds=600.0, max_entries=128)
-
-
-def _cache_key(
-    latitude: float,
-    longitude: float,
-    days: int,
-    target: str,
-) -> tuple:
-    return (
-        round(latitude, 1),
-        round(longitude, 1),
-        int(days),
-        (target or "").lower(),
-        datetime.utcnow().date().isoformat(),
-    )
 
 # We pick a single representative time per night ("midnight local") rather
 # than scoring 22:00, 00:00 and 02:00 separately. Light pollution and
@@ -109,13 +88,6 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
         except (TypeError, ValueError):
             days = 7
 
-        # Coarse cache key -> identical 7-day forecasts in the same area
-        # skip the per-day fan-out below.
-        cache_key = _cache_key(latitude, longitude, days, request.target)
-        cached = _CACHE.get(cache_key)
-        if cached is not None:
-            return cached
-
         start = datetime.utcnow().date()
         date_strs = [
             (start + timedelta(days=offset)).strftime("%Y-%m-%d")
@@ -168,7 +140,6 @@ def predict_future(request: FutureRequest, http_request: Request) -> FutureRespo
             recommendation=_recommendation_for(best["score"]),
             ai_summary=ai_explanation_service.generate_future_summary(best),
         )
-        _CACHE.put(cache_key, response)
         return response
     except HTTPException:
         raise
