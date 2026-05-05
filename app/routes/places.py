@@ -1,13 +1,23 @@
+import logging
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter(prefix="/places", tags=["places"])
 
+logger = logging.getLogger("skylens.places")
+
 _TIMEOUT = httpx.Timeout(6.0, connect=4.0)
-_UA = {"User-Agent": "SkyLens/1.0"}
+# Nominatim's usage policy requires a User-Agent that identifies the app and
+# provides contact info. Generic strings (e.g. "SkyLens/1.0") are silently
+# dropped from public OSM tiles + geocoding from time to time.
+_UA = {
+    "User-Agent": (
+        "SkyLens/1.0 (+https://github.com/janasirajput/ConHacks2026)"
+    )
+}
 
 
 def _maps_api_key() -> str:
@@ -56,30 +66,114 @@ async def _nominatim_autocomplete(text: str) -> Dict[str, List[Dict[str, str]]]:
     return _format_nominatim(data)
 
 
-async def _nominatim_geocode(text: str) -> Dict[str, Any]:
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={
-                "format": "jsonv2",
-                "q": text,
-                "limit": 1,
-                "addressdetails": 1,
-            },
-            headers=_UA,
-        )
+def _simpler_variants(text: str) -> List[str]:
+    """Progressive query simplifications to retry against weaker geocoders.
+
+    Some providers (notably public Nominatim) intermittently miss verbose
+    Google-shaped strings like "Toronto, ON, Canada". Trying shorter forms
+    significantly improves recall without changing the user's query.
+    """
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    variants: List[str] = [text]
+    if len(parts) >= 2:
+        variants.append(" ".join(parts[:2]))      # e.g. "Toronto ON"
+    if parts:
+        variants.append(parts[0])                  # e.g. "Toronto"
+    seen: set[str] = set()
+    return [v for v in variants if not (v in seen or seen.add(v))]
+
+
+async def _google_geocode(text: str, api_key: str) -> Optional[Dict[str, Any]]:
+    """Resolve via Google Geocoding API.
+
+    Returns:
+      - dict with latitude/longitude/name on success
+      - {"_zero_results": True} when Google responded cleanly with no match
+      - None when the provider itself errored (network, REQUEST_DENIED,
+        OVER_QUERY_LIMIT, etc.) so the caller can transparently try Nominatim.
+    """
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {"address": text, "key": api_key}
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.get(url, params=params)
+    except httpx.HTTPError as exc:
+        logger.warning("Google geocode network error for %r: %s", text, exc)
+        return None
+
     data = _safe_json(resp)
-    if not isinstance(data, list) or not data:
-        raise HTTPException(status_code=404, detail="Location not found")
-    first = data[0] if isinstance(data[0], dict) else {}
+    if resp.status_code != 200 or not isinstance(data, dict):
+        logger.warning(
+            "Google geocode HTTP %s for %r (body=%r)", resp.status_code, text, str(data)[:200]
+        )
+        return None
+
+    status = str(data.get("status") or "")
+    if status == "ZERO_RESULTS":
+        return {"_zero_results": True}
+    if status != "OK":
+        logger.warning("Google geocode status %s for %r: %s", status, text, data.get("error_message"))
+        return None
+
+    results = data.get("results") or []
+    if not results:
+        return {"_zero_results": True}
+    first = results[0] if isinstance(results[0], dict) else {}
+    loc = (first.get("geometry") or {}).get("location") or {}
     try:
         return {
-            "latitude": float(first["lat"]),
-            "longitude": float(first["lon"]),
-            "name": str(first.get("display_name") or text),
+            "latitude": float(loc["lat"]),
+            "longitude": float(loc["lng"]),
+            "name": str(first.get("formatted_address") or text),
         }
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail="Invalid geocoding payload") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("Google geocode payload parse error for %r: %s", text, exc)
+        return None
+
+
+async def _nominatim_geocode_robust(text: str) -> Optional[Dict[str, Any]]:
+    """Try Nominatim with progressively simplified queries.
+
+    Returns parsed result on the first variant that resolves, otherwise None
+    (caller decides between 404 zero-results and 502 provider-down).
+    """
+    for variant in _simpler_variants(text):
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                resp = await client.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params={
+                        "format": "jsonv2",
+                        "q": variant,
+                        "limit": 1,
+                        "addressdetails": 1,
+                    },
+                    headers=_UA,
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("Nominatim geocode network error for %r: %s", variant, exc)
+            continue
+
+        if resp.status_code in (403, 429):
+            logger.warning(
+                "Nominatim throttled (%s) for %r; trying next variant", resp.status_code, variant
+            )
+            continue
+
+        data = _safe_json(resp)
+        if not isinstance(data, list) or not data:
+            continue
+        first = data[0] if isinstance(data[0], dict) else {}
+        try:
+            return {
+                "latitude": float(first["lat"]),
+                "longitude": float(first["lon"]),
+                "name": str(first.get("display_name") or text),
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("Nominatim parse error for %r: %s", variant, exc)
+            continue
+    return None
 
 
 @router.get("/autocomplete")
@@ -113,6 +207,38 @@ async def autocomplete(input: str = Query(..., min_length=1)) -> Dict[str, Any]:
 
 @router.get("/geocode")
 async def geocode(input: str = Query(..., min_length=1)) -> Dict[str, Any]:
-    """Resolve text query into latitude/longitude via backend proxy."""
-    # Keep this provider-neutral for reliability and no frontend CORS pain.
-    return await _nominatim_geocode(input)
+    """Resolve text query into latitude/longitude via backend proxy.
+
+    Provider chain:
+      1. Google Geocoding API (when GOOGLE_MAPS_API_KEY is set + Geocoding API
+         is enabled). Most reliable for verbose, comma-formatted strings that
+         come from Google Places autocomplete.
+      2. Nominatim (OpenStreetMap) with progressively simplified query
+         variants. Used as primary when no Google key is configured, or as a
+         fallback when Google errored / returned ZERO_RESULTS.
+
+    Error semantics:
+      - 404 only when at least one provider responded cleanly with no match.
+      - 502 when every provider errored (network/throttled/auth) so we cannot
+        say whether the place exists. Lets the frontend show "try again" vs
+        "no such place" instead of conflating the two.
+    """
+    api_key = _maps_api_key()
+    google_zero = False
+
+    if api_key:
+        google = await _google_geocode(input, api_key)
+        if google and not google.get("_zero_results"):
+            return google
+        google_zero = bool(google and google.get("_zero_results"))
+
+    osm = await _nominatim_geocode_robust(input)
+    if osm:
+        return osm
+
+    if google_zero:
+        raise HTTPException(status_code=404, detail="Location not found")
+    raise HTTPException(
+        status_code=502,
+        detail="Geocoding providers unavailable, please retry",
+    )
