@@ -178,13 +178,19 @@ async def _nominatim_geocode_robust(text: str) -> Optional[Dict[str, Any]]:
 
 @router.get("/autocomplete")
 async def autocomplete(input: str = Query(..., min_length=1)) -> Dict[str, Any]:
-    """Proxy for Google Places Autocomplete API to hide API key."""
+    """Proxy for Google Places Autocomplete API to hide API key.
+
+    If Google returns HTTP 200 with no predictions (often ZERO_RESULTS for
+    short prefixes, or overly strict filters), fall back to Nominatim so the
+    dropdown is not silently empty."""
     api_key = _maps_api_key()
     if not api_key:
         return await _nominatim_autocomplete(input)
 
     url = "https://maps.googleapis.com/maps/api/place/autocomplete/json"
-    params = {"input": input, "key": api_key, "types": "geocode"}
+    # Omit `types` so results are not limited to Google's strict geocode
+    # subset that frequently yields empty lists for exploratory typing.
+    params = {"input": input, "key": api_key}
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.get(url, params=params)
@@ -197,12 +203,27 @@ async def autocomplete(input: str = Query(..., min_length=1)) -> Dict[str, Any]:
     status = str(data.get("status") or "")
     if status not in {"OK", "ZERO_RESULTS"}:
         # API key/billing/permission issues -> graceful fallback.
+        logger.warning(
+            "Google autocomplete status %s for %r: %s",
+            status,
+            input[:120],
+            data.get("error_message"),
+        )
         return await _nominatim_autocomplete(input)
 
     predictions = data.get("predictions")
     if not isinstance(predictions, list):
         raise HTTPException(status_code=502, detail="Invalid autocomplete response format")
-    return {"predictions": predictions}
+
+    if predictions:
+        return {"predictions": predictions}
+
+    logger.info(
+        "Google autocomplete empty (%s) for %r — trying Nominatim",
+        status,
+        input[:120],
+    )
+    return await _nominatim_autocomplete(input)
 
 
 @router.get("/geocode")
