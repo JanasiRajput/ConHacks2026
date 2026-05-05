@@ -104,42 +104,70 @@ export default function Overlay() {
   const [customTime, setCustomTime] = useState(nowISO().time);
   const [planningCustom, setPlanningCustom] = useState(false);
 
-  /* --- geocode + search --- */
+  /* --- geocode + search ---
+   *
+   * Progressive loading: each backend call updates its own card as soon
+   * as it returns, instead of blocking the whole UI on the slowest of
+   * five (`/api/nearby` and `/api/future` can each take 30-60s on a
+   * cold Render dyno). The top-level "Searching..." spinner clears as
+   * soon as `getPlan` lands -- the rest of the cards keep their own
+   * "—" placeholder until their data arrives.
+   */
   const geocodeAndSearch = useCallback(async (query) => {
     setIsSearching(true);
     setError(null);
     setShowDropdown(false);
 
+    // Reset previous results so each card visibly reloads instead of
+    // showing stale data from the last search.
+    setPlanData(null);
+    setEventsData(null);
+    setNearbyData(null);
+    setFutureData(null);
+    setAstronomyData(null);
+
+    let resolved;
     try {
-      let latitude, longitude, name;
-      const resolved = await geocode(query);
-      latitude = resolved.latitude;
-      longitude = resolved.longitude;
-      name = resolved.name;
-
-      setLocationLabel(name);
-      setActiveCoords({ latitude, longitude });
-      const { date, time } = nowISO();
-
-      const [plan, events, nearby, future, astronomy] = await Promise.all([
-        getPlan({ latitude, longitude, locationName: name, date, time }).catch(() => null),
-        getEvents({ latitude, longitude, date, time }).catch(() => null),
-        getNearby({ latitude, longitude, locationName: name }).catch(() => null),
-        getFuture({ latitude, longitude, locationName: name, days: 7 }).catch(() => null),
-        getAstronomy({ latitude, longitude, date, time }).catch(() => null),
-      ]);
-
-      setPlanData(plan);
-      setEventsData(events);
-      setNearbyData(nearby);
-      setFutureData(future);
-      setAstronomyData(astronomy);
+      resolved = await geocode(query);
     } catch (err) {
       console.error(err);
       setError(err.message || 'Something went wrong — is the backend running?');
-    } finally {
       setIsSearching(false);
+      return;
     }
+
+    const { latitude, longitude, name } = resolved;
+    setLocationLabel(name);
+    setActiveCoords({ latitude, longitude });
+    const { date, time } = nowISO();
+
+    // Fire all five in parallel and let each settle independently.
+    // Errors per card are swallowed so one slow upstream can't block the
+    // others (existing behaviour, just hoisted out of Promise.all).
+    const planPromise = getPlan({ latitude, longitude, locationName: name, date, time })
+      .then((data) => { setPlanData(data); return data; })
+      .catch((err) => { console.warn('plan failed:', err); return null; });
+
+    getAstronomy({ latitude, longitude, date, time })
+      .then(setAstronomyData)
+      .catch((err) => console.warn('astronomy failed:', err));
+
+    getEvents({ latitude, longitude, date, time })
+      .then(setEventsData)
+      .catch((err) => console.warn('events failed:', err));
+
+    getNearby({ latitude, longitude, locationName: name })
+      .then(setNearbyData)
+      .catch((err) => console.warn('nearby failed:', err));
+
+    getFuture({ latitude, longitude, locationName: name, days: 7 })
+      .then(setFutureData)
+      .catch((err) => console.warn('future failed:', err));
+
+    // Clear the global spinner as soon as the primary card is ready;
+    // other cards render their own per-section loading state.
+    await planPromise;
+    setIsSearching(false);
   }, []);
 
   const handleSearch = (e) => {
