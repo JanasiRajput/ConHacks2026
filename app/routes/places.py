@@ -1,13 +1,19 @@
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
+from app.services.response_cache import TTLCache
+
 router = APIRouter(prefix="/places", tags=["places"])
 
 logger = logging.getLogger("skylens.places")
+
+# Short TTL: repeat typing / backspacing the same substring should not
+# hammer Google+Nominatim on every keystroke burst.
+_AUTOCOMPLETE_CACHE = TTLCache(ttl_seconds=120.0, max_entries=256)
 
 _TIMEOUT = httpx.Timeout(6.0, connect=4.0)
 # Nominatim's usage policy requires a User-Agent that identifies the app and
@@ -49,7 +55,7 @@ def _format_nominatim(data: Any) -> Dict[str, List[Dict[str, str]]]:
     return {"predictions": predictions}
 
 
-async def _nominatim_autocomplete(text: str) -> Dict[str, List[Dict[str, str]]]:
+async def _nominatim_autocomplete(text: str) -> Tuple[Dict[str, List[Dict[str, str]]], int]:
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.get(
             "https://nominatim.openstreetmap.org/search",
@@ -63,7 +69,28 @@ async def _nominatim_autocomplete(text: str) -> Dict[str, List[Dict[str, str]]]:
         )
     # Even on non-200, return empty predictions gracefully for UX.
     data = _safe_json(resp)
-    return _format_nominatim(data)
+    return _format_nominatim(data), resp.status_code
+
+
+def _warn_autocomplete_empty(
+    *, body: Dict[str, Any], nominatim_http: int, google_was_tried: bool, query: str
+) -> None:
+    """Diagnostics when autocomplete returns HTTP 200 with no suggestions."""
+    if body.get("predictions"):
+        return
+    slug = query[:120]
+    if google_was_tried:
+        logger.warning(
+            "Autocomplete empty after Google+Nominatim query=%r nominatim_http=%s",
+            slug,
+            nominatim_http,
+        )
+        return
+    logger.warning(
+        "Autocomplete empty (nominatim-only) query=%r nominatim_http=%s",
+        slug,
+        nominatim_http,
+    )
 
 
 def _simpler_variants(text: str) -> List[str]:
@@ -183,47 +210,66 @@ async def autocomplete(input: str = Query(..., min_length=1)) -> Dict[str, Any]:
     If Google returns HTTP 200 with no predictions (often ZERO_RESULTS for
     short prefixes, or overly strict filters), fall back to Nominatim so the
     dropdown is not silently empty."""
+    cache_key = input.strip().lower()
+    cached = _AUTOCOMPLETE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     api_key = _maps_api_key()
+    google_was_tried = bool(api_key)
+
+    def finalize(body: Dict[str, Any], nom_http: int) -> Dict[str, Any]:
+        _warn_autocomplete_empty(
+            body=body,
+            nominatim_http=nom_http,
+            google_was_tried=google_was_tried,
+            query=input.strip(),
+        )
+        _AUTOCOMPLETE_CACHE.put(cache_key, body)
+        return body
+
     if not api_key:
-        return await _nominatim_autocomplete(input)
+        body, nom_http = await _nominatim_autocomplete(input.strip())
+        return finalize(body, nom_http)
 
     url = "https://maps.googleapis.com/maps/api/place/autocomplete/json"
-    # Omit `types` so results are not limited to Google's strict geocode
-    # subset that frequently yields empty lists for exploratory typing.
-    params = {"input": input, "key": api_key}
+    params = {"input": input.strip(), "key": api_key}
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.get(url, params=params)
 
     data = _safe_json(resp)
     if resp.status_code != 200 or not isinstance(data, dict):
-        # Fail open to OSM instead of surfacing 500 to frontend.
-        return await _nominatim_autocomplete(input)
+        body, nom_http = await _nominatim_autocomplete(input.strip())
+        return finalize(body, nom_http)
 
     status = str(data.get("status") or "")
     if status not in {"OK", "ZERO_RESULTS"}:
-        # API key/billing/permission issues -> graceful fallback.
         logger.warning(
             "Google autocomplete status %s for %r: %s",
             status,
             input[:120],
             data.get("error_message"),
         )
-        return await _nominatim_autocomplete(input)
+        body, nom_http = await _nominatim_autocomplete(input.strip())
+        return finalize(body, nom_http)
 
     predictions = data.get("predictions")
     if not isinstance(predictions, list):
         raise HTTPException(status_code=502, detail="Invalid autocomplete response format")
 
     if predictions:
-        return {"predictions": predictions}
+        out: Dict[str, Any] = {"predictions": predictions}
+        _AUTOCOMPLETE_CACHE.put(cache_key, out)
+        return out
 
     logger.info(
         "Google autocomplete empty (%s) for %r — trying Nominatim",
         status,
         input[:120],
     )
-    return await _nominatim_autocomplete(input)
+    body, nom_http = await _nominatim_autocomplete(input.strip())
+    return finalize(body, nom_http)
 
 
 @router.get("/geocode")

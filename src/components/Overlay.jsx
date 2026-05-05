@@ -20,6 +20,20 @@ function nowISO() {
   };
 }
 
+/** Stable debounced snapshot of `value` after `ms` with no trailing updates. */
+function useDebounced(value, ms) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), ms);
+    return () => clearTimeout(id);
+  }, [value, ms]);
+  return debounced;
+}
+
+/** Below this length we skip autocomplete network calls (Google/OSM behave poorly). */
+const AUTOCOMPLETE_MIN_CHARS = 3;
+const AUTOCOMPLETE_DEBOUNCE_MS = 320;
+
 export default function Overlay() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -35,54 +49,57 @@ export default function Overlay() {
   const [showDropdown, setShowDropdown] = useState(false);
   const inputRef = useRef(null);
 
-  // Cancellation + debounce for autocomplete. Without these, every
-  // keystroke fires a Nominatim call -> hits their 1 req/sec rate
-  // limit -> the dropdown silently never updates.
-  const abortControllerRef = useRef(null);
-  const debounceTimerRef = useRef(null);
+  /* Autocomplete: debounced value + Abort per effect lifecycle.
+   *
+   * Chrome DevTools may show earlier autocomplete rows as "(canceled)".
+   * That is intentional: when the debounced query changes before the fetch
+   * finishes (user kept typing), this effect's cleanup aborts the previous
+   * request so only the latest pause-after-type completes — not a backend
+   * failure. AUTOCOMPLETE_MIN_CHARS avoids useless 1–2 character calls.
+   */
+  const trimmedSearch = searchQuery.trim();
+  const debouncedAcQuery = useDebounced(trimmedSearch, AUTOCOMPLETE_DEBOUNCE_MS);
 
-  const runAutocomplete = useCallback(async (input) => {
-    if (abortControllerRef.current) abortControllerRef.current.abort();
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    try {
-      const results = await getAutocomplete(input, { signal: controller.signal });
-      if (controller.signal.aborted) return;
-      if (results && results.length > 0) {
-        setPredictions(results);
-        setShowDropdown(true);
-      } else {
-        setPredictions([]);
-        setShowDropdown(false);
-      }
-    } catch (err) {
-      if (err && err.name === 'AbortError') return;
-      console.error('Autocomplete error:', err);
-      setPredictions([]);
-    }
-  }, []);
-
-  const handleInputChange = (e) => {
-    const value = e.target.value;
-    setSearchQuery(value);
-
-    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-    if (!value.trim()) {
-      if (abortControllerRef.current) abortControllerRef.current.abort();
+  useEffect(() => {
+    if (debouncedAcQuery.length < AUTOCOMPLETE_MIN_CHARS) {
       setPredictions([]);
       setShowDropdown(false);
       return;
     }
-    debounceTimerRef.current = setTimeout(() => runAutocomplete(value), 320);
-  };
 
-  useEffect(() => {
+    const controller = new AbortController();
+
+    let active = true;
+    void (async () => {
+      try {
+        const results = await getAutocomplete(debouncedAcQuery, {
+          signal: controller.signal,
+        });
+        if (!active || controller.signal.aborted) return;
+        if (results && results.length > 0) {
+          setPredictions(results);
+          setShowDropdown(true);
+        } else {
+          setPredictions([]);
+          setShowDropdown(false);
+        }
+      } catch (err) {
+        if (err?.name === 'AbortError') return;
+        if (!active) return;
+        console.error('Autocomplete error:', err);
+        setPredictions([]);
+      }
+    })();
+
     return () => {
-      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-      if (abortControllerRef.current) abortControllerRef.current.abort();
+      active = false;
+      controller.abort();
     };
-  }, []);
+  }, [debouncedAcQuery]);
+
+  const handleInputChange = (e) => {
+    setSearchQuery(e.target.value);
+  };
 
   const selectPrediction = (prediction) => {
     setSearchQuery(prediction.description);

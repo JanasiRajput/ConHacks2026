@@ -1,10 +1,9 @@
 """Thread-safe in-process TTL cache for expensive route responses.
 
-Used by `/api/nearby` and `/api/future` to avoid recomputing the same
-weather/astronomy/light-pollution fan-out for repeat searches in the same
-area. Keys are passed in by the caller and should already be coarsened
-(e.g. lat/lon rounded to ~10 km grid) so semantically-identical searches
-hit the same entry.
+Used by `/api/nearby`, `/api/future`, and `/api/places/autocomplete` to avoid
+repeated downstream work when the caller sends equivalent requests in a short
+window. Nearby/future keys are coarsened (e.g. lat/lon rounded to ~10 km);
+autocomplete keys are normalized trimmed lowercase input.
 
 Single-process Render dyno -> a process-local dict + lock is sufficient.
 If we ever scale horizontally we'd swap this for Redis, but the call
