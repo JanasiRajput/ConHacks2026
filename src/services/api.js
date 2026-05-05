@@ -133,9 +133,14 @@ export async function geocode(query) {
 /* ------------------------------------------------------------------ */
 /*  Autocomplete helper — calls internal proxy                      */
 /* ------------------------------------------------------------------ */
-export async function getAutocomplete(query) {
+export async function getAutocomplete(query, { signal } = {}) {
   if (!API_BASE) return [];
-  const res = await fetch(`${API_BASE}/places/autocomplete?input=${encodeURIComponent(query)}`);
+  const opts = {};
+  if (signal) opts.signal = signal;
+  const res = await fetch(
+    `${API_BASE}/places/autocomplete?input=${encodeURIComponent(query)}`,
+    opts,
+  );
   if (!res.ok) return [];
   const data = await parseJsonOrThrow(res).catch(() => ({ predictions: [] }));
   return data.predictions || [];
